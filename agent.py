@@ -13,9 +13,9 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.0-flash")
 
-MAX_TELEGRAM = 3       # max messages per run
-MAX_GEMINI = 20        # max AI calls per run (1500/day limit, runs every 15min = 96 runs/day max, so 20 per run = 1920 -- safe with buffer)
-PRICE_THRESHOLD = 5.0  # % move to trigger alert
+MAX_TELEGRAM = 3
+MAX_GEMINI = 10
+PRICE_THRESHOLD = 5.0
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -67,8 +67,8 @@ def get_sec_filings(ticker):
         headers = {"User-Agent": "mamir08@gmail.com StockAlertBot"}
         r = requests.get(url, headers=headers, timeout=10)
         hits = r.json().get("hits", {}).get("hits", [])
-        print(f"{ticker}: {len(hits)} new filings today")
-        return hits[:2]  # max 2 per ticker
+        print(f"{ticker}: {len(hits)} filings today")
+        return hits[:2]
     except Exception as e:
         print(f"SEC error {ticker}: {e}")
         return []
@@ -85,7 +85,7 @@ def get_filing_text(file_url):
 
 def analyze_filing(ticker, text, gemini_calls):
     if gemini_calls[0] >= MAX_GEMINI:
-        print("Gemini limit reached for this run")
+        print("Gemini limit reached")
         return None
     if not text or len(text) < 100:
         return None
@@ -114,11 +114,11 @@ def main():
     now = datetime.utcnow()
     hour = now.hour
     telegram_sent = 0
-    gemini_calls = [0]  # mutable counter
+    gemini_calls = [0]
 
     print(f"Run at {now} UTC | {len(tickers)} tickers | {len(seen)} seen filings")
 
-    # ── Morning brief 12 UTC = 7am ET ──────────────────────────────
+    # Morning brief 12 UTC = 7am ET
     if hour == 12:
         movers = []
         for ticker in tickers:
@@ -127,7 +127,6 @@ def main():
                 icon = "🟢" if pct > 0 else "🔴"
                 movers.append(f"{icon} <b>{ticker}</b> {pct:+.1f}% · ${price:.2f}")
             time.sleep(0.3)
-
         msg = f"🌅 <b>Morning Brief — {now.strftime('%a %b %d')}</b>\n\n"
         if movers:
             msg += "📊 <b>Overnight movers:</b>\n" + "\n".join(movers)
@@ -138,7 +137,7 @@ def main():
         save_seen(new_seen)
         return
 
-    # ── Price alerts 14–21 UTC = 9:30am–4pm ET ─────────────────────
+    # Price alerts 14-21 UTC = 9:30am-4pm ET
     if 14 <= hour <= 21:
         for ticker in tickers:
             if telegram_sent >= MAX_TELEGRAM:
@@ -154,7 +153,7 @@ def main():
                 telegram_sent += 1
             time.sleep(0.4)
 
-    # ── SEC filing check ────────────────────────────────────────────
+    # SEC filing check
     for ticker in tickers:
         if telegram_sent >= MAX_TELEGRAM:
             print("Telegram limit reached")
@@ -162,7 +161,6 @@ def main():
         if gemini_calls[0] >= MAX_GEMINI:
             print("Gemini limit reached")
             break
-
         filings = get_sec_filings(ticker)
         for hit in filings:
             if telegram_sent >= MAX_TELEGRAM:
@@ -171,15 +169,12 @@ def main():
             if not filing_id or filing_id in seen:
                 continue
             new_seen.add(filing_id)
-
             source = hit.get("_source", {})
             form_type = source.get("form_type", "8-K")
             company = source.get("entity_name", ticker)
             file_url = source.get("file_url", "")
-
             filing_text = get_filing_text(file_url) if file_url else ""
             analysis = analyze_filing(ticker, filing_text, gemini_calls)
-
             if analysis:
                 msg = (
                     f"📋 <b>NEW FILING — {ticker}</b>\n"
@@ -193,11 +188,9 @@ def main():
                     f"{company} | {form_type}\n"
                     f"New SEC filing detected. Check EDGAR for details."
                 )
-
             send_telegram(msg)
             telegram_sent += 1
             time.sleep(2)
-
         time.sleep(0.5)
 
     save_seen(new_seen)
