@@ -1,0 +1,39 @@
+name: Stock Alert Agent
+
+on:
+  schedule:
+    - cron: '*/15 12-21 * * 1-5'  # Every 15 min, Mon-Fri, 7am-4pm ET
+    - cron: '0 12 * * 1-5'         # 7am ET morning brief
+  workflow_dispatch:                 # Manual trigger for testing
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests google-generativeai
+
+      - name: Run stock alert agent
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python agent.py
+
+      - name: Save seen filings state
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add seen_filings.json || true
+          git diff --staged --quiet || git commit -m "Update seen filings"
+          git push || true
