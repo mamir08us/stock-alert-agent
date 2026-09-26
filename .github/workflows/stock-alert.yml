@@ -2,9 +2,9 @@ name: Stock Alert Agent
 
 on:
   schedule:
-    - cron: '*/15 12-21 * * 1-5'  # Every 15 min, Mon-Fri, 7am-4pm ET
-    - cron: '0 12 * * 1-5'         # 7am ET morning brief
-  workflow_dispatch:                 # Manual trigger for testing
+    - cron: '*/15 14-21 * * 1-5'
+    - cron: '0 12 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   run-agent:
@@ -23,14 +23,14 @@ jobs:
       - name: Install dependencies
         run: pip install requests google-generativeai
 
-      - name: Run stock alert agent
+      - name: Run agent
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python agent.py
 
-      - name: Save seen filings state
+      - name: Save state
         run: |
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
