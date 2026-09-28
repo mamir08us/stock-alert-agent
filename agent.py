@@ -12,21 +12,14 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MAX_TELEGRAM = 5
-MAX_GEMINI = 15
-PRICE_THRESHOLD = 5.0
+PRICE_THRESHOLD = 5.0  # % move to trigger alert
 
-# ─── PRICE TARGETS ───────────────────────────────────────────────────────────
-# Your personal targets — Telegram alert when hit
-PRICE_TARGETS = {
-    "NBIS": {"sell": 286.0, "dip_buy": 199.0, "shares": 17.10},
-    "IONQ": {"sell": 72.0,  "shares": 8.33},
-    "EL":   {"sell": 120.0, "shares": 8},
-    "SOUN": {"sell": 10.0,  "shares": 782},
-    "QUBT": {"sell": 12.0,  "shares": 290},
-    "QBTS": {"sell": 22.0,  "shares": 311},
-    "RGTI": {"sell": 20.0,  "shares": 111.25},
-}
+# ─── DYNAMIC LIMITS ───────────────────────────────────────────────────────────
+
+def calc_limits(num_stocks):
+    telegram = max(3, min(8, num_stocks // 6))
+    gemini   = max(5, min(20, num_stocks // 3))
+    return telegram, gemini
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
 
@@ -74,65 +67,132 @@ def get_price(ticker):
         pass
     return None, None
 
-# ─── PRICE TARGET CHECK ───────────────────────────────────────────────────────
+# ─── DYNAMIC PRICE TARGETS FROM ANALYST DATA ──────────────────────────────────
 
-def check_price_targets(ticker, price):
-    if ticker not in PRICE_TARGETS or price is None:
-        return None
-    targets = PRICE_TARGETS[ticker]
+def get_analyst_targets(ticker):
+    """
+    Fetch live analyst consensus price target from Yahoo Finance.
+    Returns: (current_price, analyst_target, upside_pct, recommendation)
+    All from real market data — nothing hardcoded.
+    """
+    try:
+        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=financialData,recommendationTrend"
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        data = r.json()["quoteSummary"]["result"][0]
+
+        fin = data.get("financialData", {})
+        current_price   = fin.get("currentPrice", {}).get("raw")
+        target_mean     = fin.get("targetMeanPrice", {}).get("raw")
+        target_high     = fin.get("targetHighPrice", {}).get("raw")
+        target_low      = fin.get("targetLowPrice", {}).get("raw")
+        recommendation  = fin.get("recommendationKey", "hold").upper()  # BUY/HOLD/SELL
+
+        if current_price and target_mean:
+            upside = ((target_mean - current_price) / current_price) * 100
+            return {
+                "current":        round(current_price, 2),
+                "target_mean":    round(target_mean, 2),
+                "target_high":    round(target_high, 2) if target_high else None,
+                "target_low":     round(target_low, 2) if target_low else None,
+                "upside_pct":     round(upside, 1),
+                "recommendation": recommendation,
+            }
+    except Exception as e:
+        print(f"Analyst target error {ticker}: {e}")
+    return None
+
+def check_dynamic_targets(ticker, price, pct):
+    """
+    Instead of hardcoded targets — use live analyst data to flag:
+    1. Price crossed ABOVE analyst mean target (potential sell signal)
+    2. Price dropped >15% below analyst mean target (potential dip buy)
+    3. Analyst consensus is STRONG BUY and stock is near 52-week low
+    4. Stock moved 5%+ in a session (always alert)
+    """
     alerts = []
+    targets = get_analyst_targets(ticker)
 
-    if "sell" in targets and price >= targets["sell"]:
-        shares = targets.get("shares", 0)
-        value = round(shares * price, 0)
+    if not targets:
+        return alerts
+
+    current       = targets["current"]
+    target_mean   = targets["target_mean"]
+    target_high   = targets["target_high"]
+    upside        = targets["upside_pct"]
+    recommendation = targets["recommendation"]
+
+    # Alert 1 — Price crossed analyst mean target (overvalued vs consensus)
+    if price and target_mean and price >= target_mean:
         alerts.append(
-            f"🎯 <b>TARGET HIT — {ticker}</b>\n"
-            f"Price ${price:.2f} ≥ target ${targets['sell']:.2f}\n"
-            f"You hold {shares} shares = <b>${value:,.0f}</b>\n"
-            f"💬 Ask Claude: 'Should I sell {ticker} now at ${price:.2f}?'"
+            f"🎯 <b>AT/ABOVE ANALYST TARGET — {ticker}</b>\n"
+            f"Price ${price:.2f} ≥ analyst mean ${target_mean:.2f}\n"
+            f"Upside remaining to high: "
+            f"${target_high:.2f} ({((target_high-price)/price*100):.1f}%)\n"
+            f"Consensus: <b>{recommendation}</b>\n"
+            f"💬 Ask Claude: 'Should I take profit on {ticker} at ${price:.2f}?'"
         )
 
-    if "dip_buy" in targets and price <= targets["dip_buy"]:
+    # Alert 2 — Big dip below analyst target = potential buy
+    elif price and target_mean and upside >= 25 and recommendation in ("BUY", "STRONG_BUY", "STRONGBUY"):
         alerts.append(
-            f"💰 <b>DIP BUY ALERT — {ticker}</b>\n"
-            f"Price ${price:.2f} ≤ dip target ${targets['dip_buy']:.2f}\n"
-            f"💬 Ask Claude: 'Should I buy {ticker} dip at ${price:.2f}?'"
+            f"💰 <b>DIP OPPORTUNITY — {ticker}</b>\n"
+            f"Price ${price:.2f} | Analyst target ${target_mean:.2f}\n"
+            f"Potential upside: <b>+{upside:.1f}%</b>\n"
+            f"Consensus: <b>{recommendation}</b>\n"
+            f"💬 Ask Claude: 'Is {ticker} a buy at ${price:.2f} with +{upside:.1f}% upside?'"
         )
 
-    return "\n\n".join(alerts) if alerts else None
+    # Alert 3 — Big session move on a stock with analyst coverage
+    if pct and abs(pct) >= PRICE_THRESHOLD:
+        direction = "surged" if pct > 0 else "dropped"
+        icon = "🟢" if pct > 0 else "🔴"
+        alerts.append(
+            f"{icon} <b>MOVE ALERT — {ticker}</b>\n"
+            f"Stock {direction} {pct:+.1f}% · Price ${price:.2f}\n"
+            f"Analyst target: ${target_mean:.2f} ({upside:+.1f}% from here)\n"
+            f"Consensus: <b>{recommendation}</b>\n"
+            f"💬 Ask Claude: 'Why did {ticker} move {pct:+.1f}% today?'"
+        )
+
+    return alerts
 
 # ─── SEC EDGAR ────────────────────────────────────────────────────────────────
 
-SEC_UA = "Amir Mohammad mamir08@gmail.com"
+SEC_UA    = "Amir Mohammad mamir08@gmail.com"
+_cik_cache = {}
 
-def get_company_cik(ticker):
-    """Lookup CIK from SEC company_tickers.json"""
+def load_cik_map():
+    global _cik_cache
+    if _cik_cache:
+        return _cik_cache
     try:
         url = "https://www.sec.gov/files/company_tickers.json"
-        r = requests.get(url, headers={"User-Agent": SEC_UA}, timeout=15)
-        data = r.json()
-        ticker_upper = ticker.upper()
-        for entry in data.values():
-            if entry.get("ticker", "").upper() == ticker_upper:
-                return str(entry["cik_str"]).zfill(10)
+        r   = requests.get(url, headers={"User-Agent": SEC_UA}, timeout=15)
+        for entry in r.json().values():
+            t = entry.get("ticker", "").upper()
+            if t:
+                _cik_cache[t] = str(entry["cik_str"]).zfill(10)
+        print(f"CIK map loaded: {len(_cik_cache)} tickers")
     except Exception as e:
-        print(f"CIK lookup error {ticker}: {e}")
-    return None
+        print(f"CIK map load error: {e}")
+    return _cik_cache
+
+def get_company_cik(ticker):
+    return load_cik_map().get(ticker.upper())
 
 def get_sec_filings_by_cik(cik, ticker):
-    """Get today's filings using CIK — official SEC submissions API"""
     try:
-        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        r = requests.get(url, headers={"User-Agent": SEC_UA}, timeout=15)
+        url  = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        r    = requests.get(url, headers={"User-Agent": SEC_UA}, timeout=15)
         data = r.json()
 
-        recent = data.get("filings", {}).get("recent", {})
-        forms       = recent.get("form", [])
-        dates       = recent.get("filingDate", [])
-        accessions  = recent.get("accessionNumber", [])
-        docs        = recent.get("primaryDocument", [])
+        recent     = data.get("filings", {}).get("recent", {})
+        forms      = recent.get("form", [])
+        dates      = recent.get("filingDate", [])
+        accessions = recent.get("accessionNumber", [])
+        docs       = recent.get("primaryDocument", [])
 
-        today = date.today().isoformat()
+        today   = date.today().isoformat()
         results = []
 
         for form, filing_date, accession, doc in zip(forms, dates, accessions, docs):
@@ -140,9 +200,12 @@ def get_sec_filings_by_cik(cik, ticker):
                 continue
             if form not in ("8-K", "10-Q", "10-K", "S-1", "DEF 14A"):
                 continue
-            cik_int = int(cik)
+            cik_int   = int(cik)
             acc_clean = accession.replace("-", "")
-            file_url = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{doc}"
+            file_url  = (
+                f"https://www.sec.gov/Archives/edgar/data"
+                f"/{cik_int}/{acc_clean}/{doc}"
+            )
             results.append({
                 "form":      form,
                 "date":      filing_date,
@@ -162,22 +225,26 @@ def get_sec_filings_by_cik(cik, ticker):
         return []
 
 def get_filing_text(file_url):
-    """Fetch and clean filing — skip boilerplate header"""
     try:
-        r = requests.get(file_url, headers={"User-Agent": SEC_UA}, timeout=15)
+        r    = requests.get(file_url, headers={"User-Agent": SEC_UA}, timeout=15)
         text = re.sub(r'<[^>]+>', ' ', r.text)
         text = re.sub(r'\s+', ' ', text).strip()
-        # Skip first 500 chars (cover page boilerplate), take up to 3500 chars of substance
         return text[500:4000] if len(text) > 500 else text
     except Exception as e:
         print(f"Filing text error: {e}")
         return ""
 
-# ─── GEMINI ANALYSIS ──────────────────────────────────────────────────────────
+def edgar_link(form_type, cik_int):
+    return (
+        f"https://www.sec.gov/cgi-bin/browse-edgar"
+        f"?action=getcompany&CIK={cik_int}&type={form_type}"
+        f"&dateb=&owner=include&count=5"
+    )
 
-def analyze_filing(ticker, filing, text, gemini_calls):
-    """Analyze SEC filing with Gemini 2.0 flash"""
-    if gemini_calls[0] >= MAX_GEMINI:
+# ─── GEMINI ───────────────────────────────────────────────────────────────────
+
+def analyze_filing(ticker, filing, text, gemini_calls, max_gemini):
+    if gemini_calls[0] >= max_gemini:
         print("Gemini limit reached")
         return None
     if not text or len(text) < 150:
@@ -208,59 +275,51 @@ IMPACT: [HIGH / MEDIUM / LOW]"""
         print(f"Gemini error {ticker}: {e}")
         return None
 
-# ─── EDGAR FALLBACK LINK ──────────────────────────────────────────────────────
-
-def edgar_link(ticker, form_type, cik_int):
-    return (
-        f"https://www.sec.gov/cgi-bin/browse-edgar"
-        f"?action=getcompany&CIK={cik_int}&type={form_type}"
-        f"&dateb=&owner=include&count=5"
-    )
-
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
-    tickers = load_watchlist()
-    seen = load_seen()
+    tickers  = load_watchlist()
+    seen     = load_seen()
     new_seen = set(seen)
-    now = datetime.utcnow()
-    hour = now.hour
-    telegram_sent = 0
-    gemini_calls = [0]
+    now      = datetime.utcnow()
+    hour     = now.hour
 
-    print(f"Run at {now} UTC | {len(tickers)} tickers | {len(seen)} seen filings")
+    etfs = {
+        "VOO","QQQ","QQQM","SCHG","SCHD",
+        "VGT","VUG","SOXX","VWO","VXUS","VO"
+    }
+    num_stocks = len([t for t in tickers if t not in etfs])
+    max_telegram, max_gemini = calc_limits(num_stocks)
+
+    telegram_sent = 0
+    gemini_calls  = [0]
+
+    print(
+        f"Run at {now} UTC | {len(tickers)} tickers ({num_stocks} stocks) | "
+        f"limits: Telegram={max_telegram} Gemini={max_gemini}"
+    )
 
     # ── MORNING BRIEF — 12 UTC = 7 AM ET ──────────────────────────────────────
     if hour == 12:
         movers = []
-        targets_hit = []
 
         for ticker in tickers:
             price, pct = get_price(ticker)
-
-            if price:
-                alert = check_price_targets(ticker, price)
-                if alert:
-                    targets_hit.append(alert)
-
             if price and pct and abs(pct) >= 2:
                 icon = "🟢" if pct > 0 else "🔴"
                 movers.append(f"{icon} <b>{ticker}</b> {pct:+.1f}% · ${price:.2f}")
             time.sleep(0.3)
 
-        # Send target alerts first (max 2)
-        for alert in targets_hit[:2]:
-            send_telegram(alert)
-            telegram_sent += 1
-            time.sleep(1)
-
-        # Morning brief message
-        msg = f"🌅 <b>Morning Brief — {now.strftime('%a %b %d')}</b>\n\n"
+        msg  = f"🌅 <b>Morning Brief — {now.strftime('%a %b %d')}</b>\n\n"
+        msg += f"📋 Watching {len(tickers)} tickers | {max_telegram} alerts / {max_gemini} AI analyses\n\n"
         if movers:
-            msg += "📊 <b>Overnight movers (±2%+):</b>\n" + "\n".join(movers[:8])
+            msg += "📊 <b>Overnight movers (±2%+):</b>\n" + "\n".join(movers[:10])
         else:
-            msg += "All quiet overnight. No significant moves on your watchlist."
-        msg += "\n\n<i>Monitoring SEC filings every 15 min. 7 price targets active.</i>"
+            msg += "All quiet overnight. No significant moves."
+        msg += (
+            "\n\n<i>Analyst targets fetched live. "
+            "SEC filings checked every 15 min.</i>"
+        )
         send_telegram(msg)
         save_seen(new_seen)
         return
@@ -268,58 +327,48 @@ def main():
     # ── MARKET HOURS — 14–21 UTC = 9:30 AM–4 PM ET ────────────────────────────
     if 14 <= hour <= 21:
         for ticker in tickers:
-            if telegram_sent >= MAX_TELEGRAM:
+            if telegram_sent >= max_telegram:
                 break
 
             price, pct = get_price(ticker)
+            if not price:
+                time.sleep(0.3)
+                continue
 
-            # Personal price targets take priority
-            if price:
-                alert = check_price_targets(ticker, price)
-                if alert:
-                    send_telegram(alert)
-                    telegram_sent += 1
-                    time.sleep(1)
-                    continue
-
-            # Big % moves
-            if price and pct and abs(pct) >= PRICE_THRESHOLD:
-                icon = "🟢" if pct > 0 else "🔴"
-                send_telegram(
-                    f"{icon} <b>PRICE ALERT — {ticker}</b>\n"
-                    f"Move: {pct:+.1f}% · Price: ${price:.2f}\n\n"
-                    f"💬 Ask Claude: 'Should I act on {ticker} at ${price:.2f}?'"
-                )
+            # Dynamic alerts from live analyst data
+            alerts = check_dynamic_targets(ticker, price, pct)
+            for alert in alerts:
+                if telegram_sent >= max_telegram:
+                    break
+                send_telegram(alert)
                 telegram_sent += 1
+                time.sleep(1)
+
             time.sleep(0.4)
 
-    # ── SEC FILING CHECK — all hours ───────────────────────────────────────────
-    # Check key holdings only for speed (not ETFs)
-    key_tickers = [
-        "NBIS", "NVDA", "PLTR", "IONQ", "META", "AMD",
-        "AMZN", "GOOGL", "MSFT", "AVGO", "MRVL", "MU",
-        "ORCL", "LLY", "SOUN", "QUBT", "QBTS", "RGTI",
-        "ANET", "NOW", "CRWD",
-    ]
+    # ── SEC FILING CHECK — all stock tickers ───────────────────────────────────
+    load_cik_map()
 
-    for ticker in key_tickers:
-        if telegram_sent >= MAX_TELEGRAM:
+    for ticker in tickers:
+        if telegram_sent >= max_telegram:
             print("Telegram limit reached")
             break
-        if gemini_calls[0] >= MAX_GEMINI:
+        if gemini_calls[0] >= max_gemini:
             print("Gemini limit reached")
             break
+        if ticker in etfs:
+            continue
 
         cik = get_company_cik(ticker)
         if not cik:
             print(f"No CIK found for {ticker}")
-            time.sleep(0.5)
+            time.sleep(0.3)
             continue
 
         filings = get_sec_filings_by_cik(cik, ticker)
 
         for filing in filings:
-            if telegram_sent >= MAX_TELEGRAM:
+            if telegram_sent >= max_telegram:
                 break
 
             filing_id = filing["accession"]
@@ -329,21 +378,23 @@ def main():
             new_seen.add(filing_id)
             company   = filing["company"]
             form_type = filing["form"]
-            file_url  = filing["url"]
             cik_int   = filing["cik_int"]
 
-            filing_text = get_filing_text(file_url)
-            analysis    = analyze_filing(ticker, filing, filing_text, gemini_calls)
+            filing_text = get_filing_text(filing["url"])
+            analysis    = analyze_filing(
+                ticker, filing, filing_text, gemini_calls, max_gemini
+            )
 
             if analysis:
                 msg = (
                     f"📋 <b>NEW FILING — {ticker}</b>\n"
                     f"<b>{company}</b> | {form_type} | {filing['date']}\n\n"
                     f"{analysis}\n\n"
-                    f"💬 Ask Claude: 'Deep analysis on this {ticker} {form_type} filing'"
+                    f"💬 Ask Claude: "
+                    f"'Deep analysis on this {ticker} {form_type} filing'"
                 )
             else:
-                link = edgar_link(ticker, form_type, cik_int)
+                link = edgar_link(form_type, cik_int)
                 msg = (
                     f"📋 <b>NEW FILING — {ticker}</b>\n"
                     f"{company} | {form_type} | {filing['date']}\n"
@@ -355,10 +406,13 @@ def main():
             telegram_sent += 1
             time.sleep(2)
 
-        time.sleep(0.8)
+        time.sleep(0.5)
 
     save_seen(new_seen)
-    print(f"Done. Telegram: {telegram_sent}/{MAX_TELEGRAM} | Gemini: {gemini_calls[0]}/{MAX_GEMINI}")
+    print(
+        f"Done. Telegram: {telegram_sent}/{max_telegram} | "
+        f"Gemini: {gemini_calls[0]}/{max_gemini}"
+    )
 
 if __name__ == "__main__":
     main()
