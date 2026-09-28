@@ -17,8 +17,13 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # ─── DYNAMIC LIMITS ───────────────────────────────────────────────────────────
 
 def calc_limits(num_stocks):
-    telegram = max(3, min(8, num_stocks // 6))
-    gemini   = max(5, min(20, num_stocks // 3))
+    """
+    Telegram: 1 alert per 5 stocks (min 3, max 10)
+    Gemini: 3 calls per stock — one per alert signal
+    Gemini free tier: 1,500/day — very generous, increase limits
+    """
+    telegram = max(3, min(10, num_stocks // 5))
+    gemini   = max(15, min(50, num_stocks * 3))
     return telegram, gemini
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
