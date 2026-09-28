@@ -13,8 +13,8 @@ FINNHUB_API_KEY  = os.environ["FINNHUB_API_KEY"]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-PRICE_THRESHOLD = 5.0  # % move to trigger alert
-DIP_UPSIDE_MIN  = 25.0 # % upside vs analyst target to flag dip
+PRICE_THRESHOLD = 5.0
+DIP_UPSIDE_MIN  = 25.0
 
 # ─── DYNAMIC LIMITS ───────────────────────────────────────────────────────────
 
@@ -56,101 +56,83 @@ def save_seen(seen):
 # ─── PRICE ────────────────────────────────────────────────────────────────────
 
 def get_price(ticker):
-    """Get current price and daily % change from Finnhub — works on GitHub Actions"""
     try:
         url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}"
         r   = requests.get(url, timeout=10)
-        d   = r.json()
-        curr = d.get("c")   # current price
-        prev = d.get("pc")  # previous close
+        print(f"  {ticker} Finnhub status: {r.status_code} | raw: {r.text[:80]}")
+        d    = r.json()
+        curr = d.get("c")
+        prev = d.get("pc")
         if curr and prev and prev > 0:
             pct = ((curr - prev) / prev) * 100
+            print(f"  {ticker} price=${curr:.2f} pct={pct:.2f}%")
             return round(curr, 2), round(pct, 2)
+        else:
+            print(f"  {ticker} no price data: c={curr} pc={prev}")
     except Exception as e:
-        print(f"Price error {ticker}: {e}")
+        print(f"  {ticker} price error: {e}")
     return None, None
 
 # ─── FINNHUB ANALYST TARGETS ──────────────────────────────────────────────────
 
 def get_analyst_targets(ticker):
-    """
-    Fetch live analyst consensus price target from Finnhub.
-    Free tier — 60 calls/min. Returns mean, high, low targets + recommendation.
-    Same underlying data used by Goldman Sachs, Morgan Stanley etc.
-    """
     try:
-        # Price target
-        url_pt = (
-            f"https://finnhub.io/api/v1/stock/price-target"
-            f"?symbol={ticker}&token={FINNHUB_API_KEY}"
-        )
-        r_pt = requests.get(url_pt, timeout=10)
-        pt   = r_pt.json()
+        url_pt = f"https://finnhub.io/api/v1/stock/price-target?symbol={ticker}&token={FINNHUB_API_KEY}"
+        r_pt   = requests.get(url_pt, timeout=10)
+        pt     = r_pt.json()
+        print(f"  {ticker} target raw: {str(pt)[:100]}")
 
         target_mean = pt.get("targetMean")
         target_high = pt.get("targetHigh")
         target_low  = pt.get("targetLow")
 
-        # Recommendation trend (BUY/HOLD/SELL counts)
-        url_rec = (
-            f"https://finnhub.io/api/v1/stock/recommendation"
-            f"?symbol={ticker}&token={FINNHUB_API_KEY}"
-        )
-        r_rec = requests.get(url_rec, timeout=10)
-        rec   = r_rec.json()
+        url_rec = f"https://finnhub.io/api/v1/stock/recommendation?symbol={ticker}&token={FINNHUB_API_KEY}"
+        r_rec   = requests.get(url_rec, timeout=10)
+        rec     = r_rec.json()
 
-        # Latest recommendation period
         recommendation = "HOLD"
+        rec_detail     = "No data"
+
         if rec and isinstance(rec, list) and len(rec) > 0:
-            latest  = rec[0]
+            latest     = rec[0]
             strong_buy = latest.get("strongBuy", 0)
             buy        = latest.get("buy", 0)
             hold       = latest.get("hold", 0)
             sell       = latest.get("sell", 0)
             strong_sell= latest.get("strongSell", 0)
-            total = strong_buy + buy + hold + sell + strong_sell
+            total      = strong_buy + buy + hold + sell + strong_sell
             if total > 0:
-                buy_pct = (strong_buy + buy) / total * 100
-                sell_pct= (sell + strong_sell) / total * 100
+                buy_pct  = (strong_buy + buy) / total * 100
+                sell_pct = (sell + strong_sell) / total * 100
                 if buy_pct >= 60:
                     recommendation = "BUY"
                 elif sell_pct >= 40:
                     recommendation = "SELL"
                 else:
                     recommendation = "HOLD"
-                rec_detail = f"{int(buy_pct)}% analysts BUY | {int(sell_pct)}% SELL"
-            else:
-                rec_detail = "No consensus data"
-        else:
-            rec_detail = "No recommendation data"
+                rec_detail = f"{int(buy_pct)}% BUY | {int(sell_pct)}% SELL"
 
         if target_mean:
             return {
-                "target_mean":  round(target_mean, 2),
-                "target_high":  round(target_high, 2) if target_high else None,
-                "target_low":   round(target_low, 2) if target_low else None,
+                "target_mean":    round(target_mean, 2),
+                "target_high":    round(target_high, 2) if target_high else None,
+                "target_low":     round(target_low, 2) if target_low else None,
                 "recommendation": recommendation,
-                "rec_detail":   rec_detail,
+                "rec_detail":     rec_detail,
             }
     except Exception as e:
-        print(f"Finnhub target error {ticker}: {e}")
+        print(f"  {ticker} analyst target error: {e}")
     return None
 
-# ─── DYNAMIC TARGET ALERTS ───────────────────────────────────────────────────
+# ─── DYNAMIC TARGET ALERTS ────────────────────────────────────────────────────
 
 def check_dynamic_targets(ticker, price, pct):
-    """
-    Generate alerts based on live Finnhub analyst data:
-    1. Price at or above analyst mean target → possible sell
-    2. Price 25%+ below analyst mean + BUY consensus → dip opportunity
-    3. Big % session move → move alert with analyst context
-    """
-    alerts = []
+    alerts  = []
     if not price:
         return alerts
 
     targets = get_analyst_targets(ticker)
-    time.sleep(0.5)  # Finnhub rate limit — 60 calls/min
+    time.sleep(0.5)
 
     if targets:
         target_mean    = targets["target_mean"]
@@ -159,41 +141,35 @@ def check_dynamic_targets(ticker, price, pct):
         rec_detail     = targets["rec_detail"]
         upside         = ((target_mean - price) / price) * 100
 
-        # Alert 1 — Price at or above analyst mean target
         if price >= target_mean:
             remaining = ((target_high - price) / price * 100) if target_high else 0
             alerts.append(
                 f"🎯 <b>AT ANALYST TARGET — {ticker}</b>\n"
                 f"Price ${price:.2f} ≥ mean target ${target_mean:.2f}\n"
-                f"Upside to high target: +{remaining:.1f}%\n"
+                f"Upside to high: +{remaining:.1f}%\n"
                 f"Consensus: <b>{recommendation}</b> ({rec_detail})\n\n"
                 f"💬 Ask Claude: 'Should I take profit on {ticker} at ${price:.2f}?'"
             )
-
-        # Alert 2 — Big dip below analyst target with BUY consensus
         elif upside >= DIP_UPSIDE_MIN and recommendation == "BUY":
             alerts.append(
                 f"💰 <b>DIP OPPORTUNITY — {ticker}</b>\n"
-                f"Price ${price:.2f} | Analyst target ${target_mean:.2f}\n"
+                f"Price ${price:.2f} | Target ${target_mean:.2f}\n"
                 f"Implied upside: <b>+{upside:.1f}%</b>\n"
                 f"Consensus: <b>{recommendation}</b> ({rec_detail})\n\n"
                 f"💬 Ask Claude: 'Is {ticker} a buy at ${price:.2f}?'"
             )
 
-        # Alert 3 — Big % move with analyst context
         if pct and abs(pct) >= PRICE_THRESHOLD:
             icon      = "🟢" if pct > 0 else "🔴"
             direction = "surged" if pct > 0 else "dropped"
             alerts.append(
                 f"{icon} <b>MOVE ALERT — {ticker}</b>\n"
                 f"Stock {direction} {pct:+.1f}% · Price ${price:.2f}\n"
-                f"Analyst target: ${target_mean:.2f} ({upside:+.1f}% from here)\n"
+                f"Analyst target: ${target_mean:.2f} ({upside:+.1f}% upside)\n"
                 f"Consensus: <b>{recommendation}</b>\n\n"
                 f"💬 Ask Claude: 'Why did {ticker} move {pct:+.1f}% today?'"
             )
-
     else:
-        # No analyst data — price move alert only
         if pct and abs(pct) >= PRICE_THRESHOLD:
             icon      = "🟢" if pct > 0 else "🔴"
             direction = "surged" if pct > 0 else "dropped"
@@ -251,10 +227,7 @@ def get_sec_filings_by_cik(cik, ticker):
                 continue
             cik_int   = int(cik)
             acc_clean = accession.replace("-", "")
-            file_url  = (
-                f"https://www.sec.gov/Archives/edgar/data"
-                f"/{cik_int}/{acc_clean}/{doc}"
-            )
+            file_url  = f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_clean}/{doc}"
             results.append({
                 "form":      form,
                 "date":      filing_date,
@@ -294,10 +267,8 @@ def edgar_link(form_type, cik_int):
 
 def analyze_filing(ticker, filing, text, gemini_calls, max_gemini):
     if gemini_calls[0] >= max_gemini:
-        print("Gemini limit reached")
         return None
     if not text or len(text) < 150:
-        print(f"Text too short for {ticker}: {len(text)} chars")
         return None
 
     form_type = filing.get("form", "8-K")
@@ -337,11 +308,10 @@ def main():
         "VOO","QQQ","QQQM","SCHG","SCHD",
         "VGT","VUG","SOXX","VWO","VXUS","VO"
     }
-    num_stocks = len([t for t in tickers if t not in etfs])
+    num_stocks     = len([t for t in tickers if t not in etfs])
     max_telegram, max_gemini = calc_limits(num_stocks)
-
-    telegram_sent = 0
-    gemini_calls  = [0]
+    telegram_sent  = 0
+    gemini_calls   = [0]
 
     print(
         f"Run at {now} UTC | {len(tickers)} tickers ({num_stocks} stocks) | "
@@ -351,7 +321,6 @@ def main():
     # ── MORNING BRIEF — 12 UTC = 7 AM ET ──────────────────────────────────────
     if hour == 12:
         movers = []
-
         for ticker in tickers:
             price, pct = get_price(ticker)
             if price and pct and abs(pct) >= 2:
@@ -360,32 +329,27 @@ def main():
             time.sleep(0.3)
 
         msg  = f"🌅 <b>Morning Brief — {now.strftime('%a %b %d')}</b>\n\n"
-        msg += (
-            f"📋 Watching {len(tickers)} tickers | "
-            f"{max_telegram} alerts / {max_gemini} AI analyses\n"
-            f"📡 Data: Finnhub live + SEC EDGAR\n\n"
-        )
+        msg += f"📋 Watching {len(tickers)} tickers | {max_telegram} alerts / {max_gemini} AI analyses\n"
+        msg += f"📡 Finnhub live data + SEC EDGAR\n\n"
         if movers:
             msg += "📊 <b>Overnight movers (±2%+):</b>\n" + "\n".join(movers[:10])
         else:
             msg += "All quiet overnight. No significant moves."
-        msg += "\n\n<i>Analyst targets from Finnhub — same source as Goldman Sachs.</i>"
+        msg += "\n\n<i>Analyst targets from Finnhub. SEC filings every 15 min.</i>"
         send_telegram(msg)
         save_seen(new_seen)
         return
 
-    # ── MARKET HOURS — 14–21 UTC = 9:30 AM–4 PM ET ────────────────────────────
+    # ── MARKET HOURS — 14–21 UTC ───────────────────────────────────────────────
     if 14 <= hour <= 21:
+        print(f"Market hours check — fetching prices for {len(tickers)} tickers")
         for ticker in tickers:
             if telegram_sent >= max_telegram:
                 break
-
             price, pct = get_price(ticker)
             if not price:
                 time.sleep(0.3)
                 continue
-
-            # Dynamic alerts — Finnhub analyst data + price moves
             alerts = check_dynamic_targets(ticker, price, pct)
             for alert in alerts:
                 if telegram_sent >= max_telegram:
@@ -393,10 +357,11 @@ def main():
                 send_telegram(alert)
                 telegram_sent += 1
                 time.sleep(1)
-
             time.sleep(0.5)
+    else:
+        print(f"Outside market hours (hour={hour} UTC) — skipping price check")
 
-    # ── SEC FILING CHECK — all stock tickers ───────────────────────────────────
+    # ── SEC FILING CHECK ───────────────────────────────────────────────────────
     load_cik_map()
 
     for ticker in tickers:
@@ -411,8 +376,6 @@ def main():
 
         cik = get_company_cik(ticker)
         if not cik:
-            print(f"No CIK found for {ticker}")
-            time.sleep(0.3)
             continue
 
         filings = get_sec_filings_by_cik(cik, ticker)
@@ -420,7 +383,6 @@ def main():
         for filing in filings:
             if telegram_sent >= max_telegram:
                 break
-
             filing_id = filing["accession"]
             if filing_id in seen:
                 continue
@@ -431,17 +393,14 @@ def main():
             cik_int   = filing["cik_int"]
 
             filing_text = get_filing_text(filing["url"])
-            analysis    = analyze_filing(
-                ticker, filing, filing_text, gemini_calls, max_gemini
-            )
+            analysis    = analyze_filing(ticker, filing, filing_text, gemini_calls, max_gemini)
 
             if analysis:
                 msg = (
                     f"📋 <b>NEW FILING — {ticker}</b>\n"
                     f"<b>{company}</b> | {form_type} | {filing['date']}\n\n"
                     f"{analysis}\n\n"
-                    f"💬 Ask Claude: "
-                    f"'Deep analysis on this {ticker} {form_type} filing'"
+                    f"💬 Ask Claude: 'Deep analysis on this {ticker} {form_type} filing'"
                 )
             else:
                 link = edgar_link(form_type, cik_int)
