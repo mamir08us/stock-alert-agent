@@ -210,12 +210,15 @@ def upside_plain_english(price, consensus, hi_target):
 
 def ask_gemini(prompt, gemini_calls, max_gemini):
     """
-    Gemini handles ALL analysis and advice — no need for Claude or ChatGPT.
-    Free tier: 1,500 calls/day — more than enough.
+    Gemini handles ALL analysis — free tier: 1,500 calls/day.
+    Rate limit: 15 requests/minute.
+    4 second delay keeps us at 15/min safely.
+    Auto-retry once on failure.
     """
     if gemini_calls[0] >= max_gemini:
         return None
     try:
+        time.sleep(4)  # stays within 15 calls/min free tier limit
         gemini_calls[0] += 1
         response = client.models.generate_content(
             model="gemini-2.0-flash",
@@ -223,8 +226,17 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
         )
         return response.text.strip()
     except Exception as e:
-        print(f"Gemini error: {e}")
-        return None
+        print(f"Gemini error: {e} — retrying in 10s")
+        try:
+            time.sleep(10)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            return response.text.strip()
+        except Exception as e2:
+            print(f"Gemini retry failed: {e2}")
+            return None
 
 # ─── DEDUP — NO DUPLICATE ALERTS ─────────────────────────────────────────────
 
