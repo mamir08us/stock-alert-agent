@@ -231,6 +231,7 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
         print(f"Gemini limit reached: {gemini_calls[0]}/{max_gemini}")
         return None
     try:
+        time.sleep(2)  # prevent burst rate limiting
         gemini_calls[0] += 1
         print(f"Gemini call #{gemini_calls[0]}/{max_gemini}...")
         response = client.models.generate_content(
@@ -368,9 +369,12 @@ def check_all_alerts(ticker, price, pct, gemini_calls, max_gemini):
                 rec_str = rec_plain_english(rec, buy_pct, sell_pct, total)
 
             analysis = ask_gemini(
-                f"{ticker} dropped {abs(pct):.1f}% to ${price:.2f} today. "
-                f"In 3 SHORT sentences: 1) Why? 2) Panic or calm? 3) Hold, buy, or sell? "
-                f"No markdown. No headers. No disclaimers. Plain text only.",
+                f"Stock {ticker} moved {pct:+.1f}% today to ${price:.2f}. {beta_exp}. "
+                f"{target_str}"
+                f"Write 3 SHORT plain text sentences with no markdown, no asterisks, no headers: "
+                f"Sentence 1: Most likely reason for this move. "
+                f"Sentence 2: Should investor panic or stay calm and why. "
+                f"Sentence 3: One specific action — hold, buy more, or sell.",
                 gemini_calls, max_gemini
             )
 
@@ -587,9 +591,12 @@ def main():
 
             # Gemini reads the filing and gives complete plain English advice
             analysis = ask_gemini(
-                f"{ticker} filed a {form_type}. Summary: {filing_text[:300]}. "
-                f"3 sentences: 1) What happened? 2) Good or bad for stock? 3) Buy, sell, or hold? "
-                f"No markdown. Plain text only.",
+                f"{company} ({ticker}) filed a {form_type}. "
+                f"Filing content: {filing_text[:400]}. "
+                f"Write 3 SHORT plain text sentences with no markdown, no asterisks: "
+                f"Sentence 1: What happened in simple words. "
+                f"Sentence 2: Is this good or bad news for the stock price. "
+                f"Sentence 3: Should investor buy more, sell, or hold right now.",
                 gemini_calls, max_gemini
             )
 
