@@ -134,20 +134,33 @@ def get_analyst_target(ticker):
     if ticker in _target_cache:
         return _target_cache[ticker]
     try:
-        url    = f"https://financialmodelingprep.com/api/v4/price-target-consensus?symbol={ticker}&apikey={FMP_API_KEY}"
-        r      = requests.get(url, timeout=10)
-        d      = r.json()
-        data   = d[0] if isinstance(d, list) and len(d) > 0 else d if isinstance(d, dict) else None
+        # Try stable v3 endpoint first
+        url = f"https://financialmodelingprep.com/api/v3/price-target?symbol={ticker}&apikey={FMP_API_KEY}"
+        r   = requests.get(url, timeout=10)
+        d   = r.json()
         result = None
-        if data and data.get("targetConsensus"):
+
+        if isinstance(d, list) and len(d) > 0:
+            # v3 returns list of individual analyst targets — calculate consensus
+            targets = [item["priceTarget"] for item in d if item.get("priceTarget")]
+            if targets:
+                result = {
+                    "consensus": round(sum(targets) / len(targets), 2),
+                    "high":      round(max(targets), 2),
+                    "low":       round(min(targets), 2),
+                    "median":    round(sorted(targets)[len(targets)//2], 2),
+                }
+        elif isinstance(d, dict) and d.get("targetConsensus"):
             result = {
-                "consensus": round(data["targetConsensus"], 2),
-                "high":      round(data["targetHigh"], 2)   if data.get("targetHigh")   else None,
-                "low":       round(data["targetLow"], 2)    if data.get("targetLow")    else None,
-                "median":    round(data["targetMedian"], 2) if data.get("targetMedian") else None,
+                "consensus": round(d["targetConsensus"], 2),
+                "high":      round(d["targetHigh"], 2) if d.get("targetHigh") else None,
+                "low":       round(d["targetLow"], 2)  if d.get("targetLow")  else None,
+                "median":    round(d["targetMedian"], 2) if d.get("targetMedian") else None,
             }
-        else:
-            print(f"FMP no target for {ticker}: {str(d)[:60]}")
+
+        if not result:
+            print(f"FMP no target for {ticker}: {str(d)[:80]}")
+
         _target_cache[ticker] = result
         return result
     except Exception as e:
@@ -222,7 +235,7 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
         gemini_calls[0] += 1
         print(f"Gemini call #{gemini_calls[0]}/{max_gemini}...")
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.8-flash",
             contents=prompt
         )
         result = response.text.strip()
@@ -239,7 +252,7 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
             time.sleep(5)
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-3.8-flash",
                 contents=prompt
             )
             return response.text.strip()
