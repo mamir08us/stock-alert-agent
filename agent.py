@@ -333,14 +333,10 @@ def check_all_alerts(ticker, price, pct, gemini_calls, max_gemini):
                 rec, buy_pct, sell_pct, total = get_analyst_recommendation(ticker)
 
                 analysis = ask_gemini(
-                    f"Stock: {ticker}. Dropped {abs(pct):.1f}% today to ${price:.2f}. "
-                    f"Wall Street experts average target: ${consensus:.2f} "
-                    f"(that's {upside:.1f}% higher than today's price). "
-                    f"{buy_pct}% of {total} analysts say BUY. "
-                    f"Answer these 3 things in simple language a beginner investor understands: "
-                    f"1) Is this drop a good buying opportunity or a warning sign? "
-                    f"2) What is most likely causing this drop today? "
-                    f"3) What is the ONE specific thing I should do — buy now, wait, or avoid?",
+                    f"{ticker} dropped {abs(pct):.1f}% to ${price:.2f}. "
+                    f"Analyst target ${consensus:.2f} = {upside:.1f}% upside. {buy_pct}% of {total} say BUY. "
+                    f"3 sentences: 1) Buy dip or falling knife? 2) Why dropping? 3) One action now. "
+                    f"No markdown. Plain text only.",
                     gemini_calls, max_gemini
                 )
 
@@ -372,15 +368,9 @@ def check_all_alerts(ticker, price, pct, gemini_calls, max_gemini):
                 rec_str = rec_plain_english(rec, buy_pct, sell_pct, total)
 
             analysis = ask_gemini(
-                f"Stock: {ticker}. Has {direction} {abs(pct):.1f}% today to ${price:.2f}. "
-                f"This is an unusual move — bigger than its normal daily movement. "
-                f"Volatility info: {beta_exp}. "
-                f"{target_str} "
-                f"Answer these 3 things in simple language a beginner investor understands: "
-                f"1) What most likely caused this move today? "
-                f"2) Is this a reason to panic, celebrate, or stay calm? "
-                f"3) What is the ONE specific thing I should do right now — "
-                f"buy more, sell some, or just hold and watch?",
+                f"{ticker} dropped {abs(pct):.1f}% to ${price:.2f} today. "
+                f"In 3 SHORT sentences: 1) Why? 2) Panic or calm? 3) Hold, buy, or sell? "
+                f"No markdown. No headers. No disclaimers. Plain text only.",
                 gemini_calls, max_gemini
             )
 
@@ -597,15 +587,9 @@ def main():
 
             # Gemini reads the filing and gives complete plain English advice
             analysis = ask_gemini(
-                f"Company: {company} (stock ticker: {ticker}). "
-                f"They just filed an official document with the US government. "
-                f"Document type: {form_plain} ({form_type}). "
-                f"Here is what it says: {filing_text[:800]}. "
-                f"Answer these 3 things in very simple language anyone can understand: "
-                f"1) What exactly happened — explain like I am 10 years old. "
-                f"2) Is this GOOD news or BAD news for the stock price? Why? "
-                f"3) What should I do RIGHT NOW — buy more shares, sell my shares, "
-                f"or just hold and do nothing? Give a clear direct recommendation.",
+                f"{ticker} filed a {form_type}. Summary: {filing_text[:300]}. "
+                f"3 sentences: 1) What happened? 2) Good or bad for stock? 3) Buy, sell, or hold? "
+                f"No markdown. Plain text only.",
                 gemini_calls, max_gemini
             )
 
