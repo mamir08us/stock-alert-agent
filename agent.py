@@ -231,7 +231,7 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
         print(f"Gemini limit reached: {gemini_calls[0]}/{max_gemini}")
         return None
     try:
-        time.sleep(2)  # prevent burst rate limiting
+        time.sleep(5)  # prevent burst rate limiting — 5s = max 12 calls/min safely
         gemini_calls[0] += 1
         print(f"Gemini call #{gemini_calls[0]}/{max_gemini}...")
         response = client.models.generate_content(
