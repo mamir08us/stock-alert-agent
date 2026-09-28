@@ -210,25 +210,34 @@ def upside_plain_english(price, consensus, hi_target):
 
 def ask_gemini(prompt, gemini_calls, max_gemini):
     """
-    Gemini handles ALL analysis — free tier: 1,500 calls/day.
-    Rate limit: 15 requests/minute.
-    4 second delay keeps us at 15/min safely.
-    Auto-retry once on failure.
+    Gemini 2.0 flash free tier: 1,500 calls/day, 15 calls/minute.
+    4s delay between calls stays within rate limit.
+    Logs exact error for debugging.
     """
     if gemini_calls[0] >= max_gemini:
+        print(f"Gemini limit reached: {gemini_calls[0]}/{max_gemini}")
         return None
     try:
-        time.sleep(4)  # stays within 15 calls/min free tier limit
+        time.sleep(4)
         gemini_calls[0] += 1
+        print(f"Gemini call #{gemini_calls[0]}/{max_gemini}...")
         response = client.models.generate_content(
             model="gemini-2.0-flash",
             contents=prompt
         )
-        return response.text.strip()
+        result = response.text.strip()
+        print(f"Gemini OK ({len(result)} chars)")
+        return result
     except Exception as e:
-        print(f"Gemini error: {e} — retrying in 10s")
+        err = str(e)
+        print(f"Gemini FAILED: {err}")
+        if "429" in err or "quota" in err.lower() or "rate" in err.lower():
+            print("Rate limit hit — waiting 30s and retrying")
+            time.sleep(30)
+        else:
+            print("Other error — retrying in 5s")
+            time.sleep(5)
         try:
-            time.sleep(10)
             response = client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=prompt
