@@ -6,13 +6,15 @@ import re
 from datetime import datetime, date
 from google import genai
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
+FINNHUB_API_KEY  = os.environ["FINNHUB_API_KEY"]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 PRICE_THRESHOLD = 5.0  # % move to trigger alert
+DIP_UPSIDE_MIN  = 25.0 # % upside vs analyst target to flag dip
 
 # ─── DYNAMIC LIMITS ───────────────────────────────────────────────────────────
 
@@ -54,105 +56,152 @@ def save_seen(seen):
 # ─── PRICE ────────────────────────────────────────────────────────────────────
 
 def get_price(ticker):
+    """Get current price and daily % change from Finnhub — works on GitHub Actions"""
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        data = r.json()["chart"]["result"][0]
-        closes = data["indicators"]["quote"][0]["close"]
-        if len(closes) >= 2 and closes[-2] and closes[-1]:
-            prev, curr = closes[-2], closes[-1]
+        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}"
+        r   = requests.get(url, timeout=10)
+        d   = r.json()
+        curr = d.get("c")   # current price
+        prev = d.get("pc")  # previous close
+        if curr and prev and prev > 0:
             pct = ((curr - prev) / prev) * 100
             return round(curr, 2), round(pct, 2)
-    except:
-        pass
+    except Exception as e:
+        print(f"Price error {ticker}: {e}")
     return None, None
 
-# ─── DYNAMIC PRICE TARGETS FROM ANALYST DATA ──────────────────────────────────
+# ─── FINNHUB ANALYST TARGETS ──────────────────────────────────────────────────
 
 def get_analyst_targets(ticker):
     """
-    Fetch live analyst consensus price target from Yahoo Finance.
-    Returns: (current_price, analyst_target, upside_pct, recommendation)
-    All from real market data — nothing hardcoded.
+    Fetch live analyst consensus price target from Finnhub.
+    Free tier — 60 calls/min. Returns mean, high, low targets + recommendation.
+    Same underlying data used by Goldman Sachs, Morgan Stanley etc.
     """
     try:
-        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=financialData,recommendationTrend"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        data = r.json()["quoteSummary"]["result"][0]
+        # Price target
+        url_pt = (
+            f"https://finnhub.io/api/v1/stock/price-target"
+            f"?symbol={ticker}&token={FINNHUB_API_KEY}"
+        )
+        r_pt = requests.get(url_pt, timeout=10)
+        pt   = r_pt.json()
 
-        fin = data.get("financialData", {})
-        current_price   = fin.get("currentPrice", {}).get("raw")
-        target_mean     = fin.get("targetMeanPrice", {}).get("raw")
-        target_high     = fin.get("targetHighPrice", {}).get("raw")
-        target_low      = fin.get("targetLowPrice", {}).get("raw")
-        recommendation  = fin.get("recommendationKey", "hold").upper()  # BUY/HOLD/SELL
+        target_mean = pt.get("targetMean")
+        target_high = pt.get("targetHigh")
+        target_low  = pt.get("targetLow")
 
-        if current_price and target_mean:
-            upside = ((target_mean - current_price) / current_price) * 100
+        # Recommendation trend (BUY/HOLD/SELL counts)
+        url_rec = (
+            f"https://finnhub.io/api/v1/stock/recommendation"
+            f"?symbol={ticker}&token={FINNHUB_API_KEY}"
+        )
+        r_rec = requests.get(url_rec, timeout=10)
+        rec   = r_rec.json()
+
+        # Latest recommendation period
+        recommendation = "HOLD"
+        if rec and isinstance(rec, list) and len(rec) > 0:
+            latest  = rec[0]
+            strong_buy = latest.get("strongBuy", 0)
+            buy        = latest.get("buy", 0)
+            hold       = latest.get("hold", 0)
+            sell       = latest.get("sell", 0)
+            strong_sell= latest.get("strongSell", 0)
+            total = strong_buy + buy + hold + sell + strong_sell
+            if total > 0:
+                buy_pct = (strong_buy + buy) / total * 100
+                sell_pct= (sell + strong_sell) / total * 100
+                if buy_pct >= 60:
+                    recommendation = "BUY"
+                elif sell_pct >= 40:
+                    recommendation = "SELL"
+                else:
+                    recommendation = "HOLD"
+                rec_detail = f"{int(buy_pct)}% analysts BUY | {int(sell_pct)}% SELL"
+            else:
+                rec_detail = "No consensus data"
+        else:
+            rec_detail = "No recommendation data"
+
+        if target_mean:
             return {
-                "current":        round(current_price, 2),
-                "target_mean":    round(target_mean, 2),
-                "target_high":    round(target_high, 2) if target_high else None,
-                "target_low":     round(target_low, 2) if target_low else None,
-                "upside_pct":     round(upside, 1),
+                "target_mean":  round(target_mean, 2),
+                "target_high":  round(target_high, 2) if target_high else None,
+                "target_low":   round(target_low, 2) if target_low else None,
                 "recommendation": recommendation,
+                "rec_detail":   rec_detail,
             }
     except Exception as e:
-        print(f"Analyst target error {ticker}: {e}")
+        print(f"Finnhub target error {ticker}: {e}")
     return None
+
+# ─── DYNAMIC TARGET ALERTS ───────────────────────────────────────────────────
 
 def check_dynamic_targets(ticker, price, pct):
     """
-    Instead of hardcoded targets — use live analyst data to flag:
-    1. Price crossed ABOVE analyst mean target (potential sell signal)
-    2. Price dropped >15% below analyst mean target (potential dip buy)
-    3. Analyst consensus is STRONG BUY and stock is near 52-week low
-    4. Stock moved 5%+ in a session (always alert)
+    Generate alerts based on live Finnhub analyst data:
+    1. Price at or above analyst mean target → possible sell
+    2. Price 25%+ below analyst mean + BUY consensus → dip opportunity
+    3. Big % session move → move alert with analyst context
     """
     alerts = []
-    targets = get_analyst_targets(ticker)
-
-    if not targets:
+    if not price:
         return alerts
 
-    current       = targets["current"]
-    target_mean   = targets["target_mean"]
-    target_high   = targets["target_high"]
-    upside        = targets["upside_pct"]
-    recommendation = targets["recommendation"]
+    targets = get_analyst_targets(ticker)
+    time.sleep(0.5)  # Finnhub rate limit — 60 calls/min
 
-    # Alert 1 — Price crossed analyst mean target (overvalued vs consensus)
-    if price and target_mean and price >= target_mean:
-        alerts.append(
-            f"🎯 <b>AT/ABOVE ANALYST TARGET — {ticker}</b>\n"
-            f"Price ${price:.2f} ≥ analyst mean ${target_mean:.2f}\n"
-            f"Upside remaining to high: "
-            f"${target_high:.2f} ({((target_high-price)/price*100):.1f}%)\n"
-            f"Consensus: <b>{recommendation}</b>\n"
-            f"💬 Ask Claude: 'Should I take profit on {ticker} at ${price:.2f}?'"
-        )
+    if targets:
+        target_mean    = targets["target_mean"]
+        target_high    = targets["target_high"]
+        recommendation = targets["recommendation"]
+        rec_detail     = targets["rec_detail"]
+        upside         = ((target_mean - price) / price) * 100
 
-    # Alert 2 — Big dip below analyst target = potential buy
-    elif price and target_mean and upside >= 25 and recommendation in ("BUY", "STRONG_BUY", "STRONGBUY"):
-        alerts.append(
-            f"💰 <b>DIP OPPORTUNITY — {ticker}</b>\n"
-            f"Price ${price:.2f} | Analyst target ${target_mean:.2f}\n"
-            f"Potential upside: <b>+{upside:.1f}%</b>\n"
-            f"Consensus: <b>{recommendation}</b>\n"
-            f"💬 Ask Claude: 'Is {ticker} a buy at ${price:.2f} with +{upside:.1f}% upside?'"
-        )
+        # Alert 1 — Price at or above analyst mean target
+        if price >= target_mean:
+            remaining = ((target_high - price) / price * 100) if target_high else 0
+            alerts.append(
+                f"🎯 <b>AT ANALYST TARGET — {ticker}</b>\n"
+                f"Price ${price:.2f} ≥ mean target ${target_mean:.2f}\n"
+                f"Upside to high target: +{remaining:.1f}%\n"
+                f"Consensus: <b>{recommendation}</b> ({rec_detail})\n\n"
+                f"💬 Ask Claude: 'Should I take profit on {ticker} at ${price:.2f}?'"
+            )
 
-    # Alert 3 — Big session move on a stock with analyst coverage
-    if pct and abs(pct) >= PRICE_THRESHOLD:
-        direction = "surged" if pct > 0 else "dropped"
-        icon = "🟢" if pct > 0 else "🔴"
-        alerts.append(
-            f"{icon} <b>MOVE ALERT — {ticker}</b>\n"
-            f"Stock {direction} {pct:+.1f}% · Price ${price:.2f}\n"
-            f"Analyst target: ${target_mean:.2f} ({upside:+.1f}% from here)\n"
-            f"Consensus: <b>{recommendation}</b>\n"
-            f"💬 Ask Claude: 'Why did {ticker} move {pct:+.1f}% today?'"
-        )
+        # Alert 2 — Big dip below analyst target with BUY consensus
+        elif upside >= DIP_UPSIDE_MIN and recommendation == "BUY":
+            alerts.append(
+                f"💰 <b>DIP OPPORTUNITY — {ticker}</b>\n"
+                f"Price ${price:.2f} | Analyst target ${target_mean:.2f}\n"
+                f"Implied upside: <b>+{upside:.1f}%</b>\n"
+                f"Consensus: <b>{recommendation}</b> ({rec_detail})\n\n"
+                f"💬 Ask Claude: 'Is {ticker} a buy at ${price:.2f}?'"
+            )
+
+        # Alert 3 — Big % move with analyst context
+        if pct and abs(pct) >= PRICE_THRESHOLD:
+            icon      = "🟢" if pct > 0 else "🔴"
+            direction = "surged" if pct > 0 else "dropped"
+            alerts.append(
+                f"{icon} <b>MOVE ALERT — {ticker}</b>\n"
+                f"Stock {direction} {pct:+.1f}% · Price ${price:.2f}\n"
+                f"Analyst target: ${target_mean:.2f} ({upside:+.1f}% from here)\n"
+                f"Consensus: <b>{recommendation}</b>\n\n"
+                f"💬 Ask Claude: 'Why did {ticker} move {pct:+.1f}% today?'"
+            )
+
+    else:
+        # No analyst data — price move alert only
+        if pct and abs(pct) >= PRICE_THRESHOLD:
+            icon      = "🟢" if pct > 0 else "🔴"
+            direction = "surged" if pct > 0 else "dropped"
+            alerts.append(
+                f"{icon} <b>MOVE ALERT — {ticker}</b>\n"
+                f"Stock {direction} {pct:+.1f}% · Price ${price:.2f}\n\n"
+                f"💬 Ask Claude: 'Why did {ticker} move {pct:+.1f}% today?'"
+            )
 
     return alerts
 
@@ -311,15 +360,16 @@ def main():
             time.sleep(0.3)
 
         msg  = f"🌅 <b>Morning Brief — {now.strftime('%a %b %d')}</b>\n\n"
-        msg += f"📋 Watching {len(tickers)} tickers | {max_telegram} alerts / {max_gemini} AI analyses\n\n"
+        msg += (
+            f"📋 Watching {len(tickers)} tickers | "
+            f"{max_telegram} alerts / {max_gemini} AI analyses\n"
+            f"📡 Data: Finnhub live + SEC EDGAR\n\n"
+        )
         if movers:
             msg += "📊 <b>Overnight movers (±2%+):</b>\n" + "\n".join(movers[:10])
         else:
             msg += "All quiet overnight. No significant moves."
-        msg += (
-            "\n\n<i>Analyst targets fetched live. "
-            "SEC filings checked every 15 min.</i>"
-        )
+        msg += "\n\n<i>Analyst targets from Finnhub — same source as Goldman Sachs.</i>"
         send_telegram(msg)
         save_seen(new_seen)
         return
@@ -335,7 +385,7 @@ def main():
                 time.sleep(0.3)
                 continue
 
-            # Dynamic alerts from live analyst data
+            # Dynamic alerts — Finnhub analyst data + price moves
             alerts = check_dynamic_targets(ticker, price, pct)
             for alert in alerts:
                 if telegram_sent >= max_telegram:
@@ -344,7 +394,7 @@ def main():
                 telegram_sent += 1
                 time.sleep(1)
 
-            time.sleep(0.4)
+            time.sleep(0.5)
 
     # ── SEC FILING CHECK — all stock tickers ───────────────────────────────────
     load_cik_map()
