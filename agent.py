@@ -231,7 +231,6 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
         print(f"Gemini limit reached: {gemini_calls[0]}/{max_gemini}")
         return None
     try:
-        time.sleep(4)
         gemini_calls[0] += 1
         print(f"Gemini call #{gemini_calls[0]}/{max_gemini}...")
         response = client.models.generate_content(
@@ -239,6 +238,9 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
             contents=prompt
         )
         result = response.text.strip()
+        # Clean markdown formatting — Telegram doesn't render it nicely
+        result = result.replace("###", "").replace("**", "").replace("***", "")
+        result = result.replace("* *", "").replace("  ", " ").strip()
         print(f"Gemini OK ({len(result)} chars)")
         return result
     except Exception as e:
