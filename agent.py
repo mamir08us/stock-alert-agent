@@ -56,11 +56,10 @@ def save_seen(seen):
 # ─── FINNHUB — LIVE PRICE ─────────────────────────────────────────────────────
 
 def get_price(ticker):
-    """Live price + daily % change from Finnhub"""
     try:
-        url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}"
-        r   = requests.get(url, timeout=10)
-        d   = r.json()
+        url  = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={FINNHUB_API_KEY}"
+        r    = requests.get(url, timeout=10)
+        d    = r.json()
         curr = d.get("c")
         prev = d.get("pc")
         if curr and prev and prev > 0:
@@ -70,48 +69,51 @@ def get_price(ticker):
         print(f"Price error {ticker}: {e}")
     return None, None
 
-# ─── FINNHUB — BETA FOR DYNAMIC THRESHOLD ─────────────────────────────────────
+# ─── FINNHUB — BETA ───────────────────────────────────────────────────────────
+
+_beta_cache = {}
 
 def get_beta(ticker):
-    """Get stock beta from Finnhub — used to set dynamic alert threshold"""
+    if ticker in _beta_cache:
+        return _beta_cache[ticker]
     try:
-        url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_API_KEY}"
-        r   = requests.get(url, timeout=10)
-        d   = r.json()
-        return d.get("metric", {}).get("beta")
+        url  = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_API_KEY}"
+        r    = requests.get(url, timeout=10)
+        beta = r.json().get("metric", {}).get("beta")
+        _beta_cache[ticker] = beta
+        return beta
     except:
         return None
 
 def dynamic_threshold(beta):
-    """
-    Alert threshold based on live beta — no hardcoded values.
-    High beta = volatile stock = needs bigger move to alert.
-    Low beta  = stable stock  = smaller move worth alerting.
-    """
+    if beta is None: return 3.0
+    if beta > 2.0:   return 5.0
+    if beta > 1.5:   return 4.0
+    if beta > 1.0:   return 3.0
+    return 2.0
+
+def beta_plain_english(beta):
     if beta is None:
-        return 3.0
-    if beta > 2.0:  return 5.0   # e.g. quantum stocks, SOUN
-    if beta > 1.5:  return 4.0   # e.g. NVDA, META
-    if beta > 1.0:  return 3.0   # e.g. AMZN, GOOGL
-    return 2.0                   # e.g. stable blue chips
+        return "normal stock — standard alert level used"
+    if beta > 2.0:
+        return f"very wild stock (volatility score {beta:.1f}) — only big moves worth alerting"
+    if beta > 1.5:
+        return f"active stock (volatility score {beta:.1f}) — today's move is bigger than usual"
+    if beta > 1.0:
+        return f"slightly active stock (volatility score {beta:.1f}) — worth watching"
+    return f"calm stable stock (volatility score {beta:.1f}) — even small moves matter here"
 
 # ─── FINNHUB — ETF DETECTION ──────────────────────────────────────────────────
 
 _etf_cache = {}
 
 def is_etf(ticker):
-    """
-    Detect ETFs dynamically via Finnhub profile.
-    No hardcoded ETF list — auto detects any ETF added to watchlist.
-    """
     if ticker in _etf_cache:
         return _etf_cache[ticker]
     try:
-        url = f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={FINNHUB_API_KEY}"
-        r   = requests.get(url, timeout=8)
-        d   = r.json()
-        # ETFs have no finnhubIndustry or empty string
-        industry = d.get("finnhubIndustry", "")
+        url      = f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={FINNHUB_API_KEY}"
+        r        = requests.get(url, timeout=8)
+        industry = r.json().get("finnhubIndustry", "")
         result   = not industry or industry == ""
         _etf_cache[ticker] = result
         return result
@@ -124,27 +126,19 @@ def is_etf(ticker):
 _target_cache = {}
 
 def get_analyst_target(ticker):
-    """
-    Live analyst consensus price target from FMP free tier.
-    Cached per run — one API call per ticker.
-    250 free calls/day — sufficient for watchlist.
-    """
     if ticker in _target_cache:
         return _target_cache[ticker]
     try:
-        url = (
-            f"https://financialmodelingprep.com/api/v4/price-target-consensus"
-            f"?symbol={ticker}&apikey={FMP_API_KEY}"
-        )
+        url    = f"https://financialmodelingprep.com/api/v4/price-target-consensus?symbol={ticker}&apikey={FMP_API_KEY}"
         r      = requests.get(url, timeout=10)
         d      = r.json()
-        result = None
         data   = d[0] if isinstance(d, list) and len(d) > 0 else d if isinstance(d, dict) else None
+        result = None
         if data and data.get("targetConsensus"):
             result = {
                 "consensus": round(data["targetConsensus"], 2),
-                "high":      round(data["targetHigh"], 2) if data.get("targetHigh") else None,
-                "low":       round(data["targetLow"], 2) if data.get("targetLow") else None,
+                "high":      round(data["targetHigh"], 2)   if data.get("targetHigh")   else None,
+                "low":       round(data["targetLow"], 2)    if data.get("targetLow")    else None,
                 "median":    round(data["targetMedian"], 2) if data.get("targetMedian") else None,
             }
         else:
@@ -156,48 +150,65 @@ def get_analyst_target(ticker):
         return None
 
 def get_analyst_recommendation(ticker):
-    """Live analyst buy/hold/sell counts from FMP"""
     try:
-        url = (
-            f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations"
-            f"/{ticker}?limit=1&apikey={FMP_API_KEY}"
-        )
-        r = requests.get(url, timeout=10)
-        d = r.json()
+        url = f"https://financialmodelingprep.com/api/v3/analyst-stock-recommendations/{ticker}?limit=1&apikey={FMP_API_KEY}"
+        r   = requests.get(url, timeout=10)
+        d   = r.json()
         if isinstance(d, list) and len(d) > 0:
-            latest      = d[0]
-            strong_buy  = latest.get("analystRatingsStrongBuy", 0)
-            buy         = latest.get("analystRatingsbuy", 0)
-            hold        = latest.get("analystRatingsHold", 0)
-            sell        = latest.get("analystRatingsSell", 0)
-            strong_sell = latest.get("analystRatingsStrongSell", 0)
+            l           = d[0]
+            strong_buy  = l.get("analystRatingsStrongBuy", 0)
+            buy         = l.get("analystRatingsbuy", 0)
+            hold        = l.get("analystRatingsHold", 0)
+            sell        = l.get("analystRatingsSell", 0)
+            strong_sell = l.get("analystRatingsStrongSell", 0)
             total = strong_buy + buy + hold + sell + strong_sell
             if total > 0:
                 buy_pct  = (strong_buy + buy) / total * 100
                 sell_pct = (sell + strong_sell) / total * 100
-                if strong_buy / total * 100 >= 50:
-                    rec = "STRONG BUY"
-                elif buy_pct >= 60:
-                    rec = "BUY"
-                elif sell_pct >= 40:
-                    rec = "SELL"
-                else:
-                    rec = "HOLD"
-                return rec, f"{int(buy_pct)}% BUY | {int(sell_pct)}% SELL | {total} analysts"
+                if strong_buy / total * 100 >= 50: rec = "STRONG BUY"
+                elif buy_pct >= 60:                rec = "BUY"
+                elif sell_pct >= 40:               rec = "SELL"
+                else:                              rec = "HOLD"
+                return rec, int(buy_pct), int(sell_pct), total
     except Exception as e:
         print(f"FMP rec error {ticker}: {e}")
-    return None, None
+    return None, 0, 0, 0
 
-# ─── GEMINI — INSTANT ANALYSIS ────────────────────────────────────────────────
+def rec_plain_english(rec, buy_pct, sell_pct, total):
+    if not rec:
+        return "No expert opinion available."
+    if rec == "STRONG BUY":
+        return f"✅ {buy_pct}% of {total} Wall Street experts say BUY — very strong confidence."
+    if rec == "BUY":
+        return f"✅ {buy_pct}% of {total} experts say BUY — generally positive outlook."
+    if rec == "HOLD":
+        return f"⚠️ Experts are mixed — {buy_pct}% say buy, {sell_pct}% say sell. No clear signal."
+    return f"🔴 {sell_pct}% of {total} experts say SELL — proceed with caution."
 
-def gemini_analysis(prompt, gemini_calls, max_gemini):
+def upside_plain_english(price, consensus, hi_target):
+    if not consensus:
+        return ""
+    upside = ((consensus - price) / price) * 100
+    if price >= consensus:
+        remaining = ((hi_target - price) / price * 100) if hi_target else 0
+        return (
+            f"📊 Stock reached the average expert price target of ${consensus:.2f}. "
+            f"Still {remaining:.1f}% room to the most optimistic expert target of ${hi_target:.2f}."
+        )
+    if upside > 30:
+        return f"📊 Experts think this stock is worth ${consensus:.2f} — that is {upside:.1f}% MORE than today's price. Big potential."
+    if upside > 15:
+        return f"📊 Experts think this stock is worth ${consensus:.2f} — that is {upside:.1f}% more than today. Good potential."
+    return f"📊 Experts think this stock is worth ${consensus:.2f} — that is {upside:.1f}% more than today."
+
+# ─── GEMINI — ALL AI ANALYSIS ─────────────────────────────────────────────────
+
+def ask_gemini(prompt, gemini_calls, max_gemini):
     """
-    Use Gemini for ALL AI analysis — price moves + SEC filings.
+    Gemini handles ALL analysis and advice — no need for Claude or ChatGPT.
     Free tier: 1,500 calls/day — more than enough.
-    Single AI — clean and simple.
     """
     if gemini_calls[0] >= max_gemini:
-        print("Gemini limit reached")
         return None
     try:
         gemini_calls[0] += 1
@@ -210,114 +221,144 @@ def gemini_analysis(prompt, gemini_calls, max_gemini):
         print(f"Gemini error: {e}")
         return None
 
+# ─── DEDUP — NO DUPLICATE ALERTS ─────────────────────────────────────────────
+
+_alerted_this_run = set()
+
+def already_alerted(ticker, signal):
+    key = f"{ticker}:{signal}"
+    if key in _alerted_this_run:
+        return True
+    _alerted_this_run.add(key)
+    return False
+
 # ─── DYNAMIC ALERT LOGIC ──────────────────────────────────────────────────────
 
 def check_all_alerts(ticker, price, pct, gemini_calls, max_gemini):
     """
-    Fully dynamic alerts — zero hardcoded values.
-
-    Sources:
-    - Finnhub: live price, % change, beta
-    - FMP: live analyst consensus target + recommendation
-    - Gemini: AI analysis of every alert
-
-    Three signal types:
-    1. Price at/above analyst consensus → potential sell
-    2. Price well below consensus + dropping → dip opportunity
-    3. Price moved beyond dynamic beta threshold → move alert
+    Fully dynamic — zero hardcoded values.
+    Gemini provides complete analysis + action advice in every alert.
+    No need to open Claude or ChatGPT — answer is right in Telegram.
     """
     alerts = []
     if not price:
         return alerts
 
-    # Get beta for dynamic threshold
     beta      = get_beta(ticker)
     threshold = dynamic_threshold(beta)
-    beta_str  = f"{beta:.1f}" if beta else "N/A"
-
-    # Get live analyst data from FMP
-    target = get_analyst_target(ticker)
+    beta_exp  = beta_plain_english(beta)
+    target    = get_analyst_target(ticker)
     time.sleep(0.2)
 
-    # ── SIGNAL 1: At/above analyst consensus ──────────────────────────────────
+    # ── SIGNAL 1: Price at/above analyst consensus ─────────────────────────────
     if target and target.get("consensus"):
         consensus = target["consensus"]
         hi_target = target.get("high")
         upside    = ((consensus - price) / price) * 100
 
-        if price >= consensus:
-            rec, rec_detail = get_analyst_recommendation(ticker)
+        if price >= consensus and not already_alerted(ticker, "AT_TARGET"):
+            rec, buy_pct, sell_pct, total = get_analyst_recommendation(ticker)
             remaining = round((hi_target - price) / price * 100, 1) if hi_target else 0
 
-            analysis = gemini_analysis(
-                f"{ticker} at ${price:.2f} has reached its analyst consensus target of "
-                f"${consensus:.2f}. Analyst consensus: {rec}. {rec_detail}. "
-                f"Upside remaining to analyst high: +{remaining:.1f}%. "
-                f"Beta: {beta_str}. "
-                f"In 2-3 sentences: should the investor take profit, hold for the high target, "
-                f"or wait for pullback? Be specific and direct.",
+            # Gemini gives complete analysis AND clear action
+            analysis = ask_gemini(
+                f"Stock: {ticker}. Current price: ${price:.2f}. "
+                f"Just reached analyst consensus target of ${consensus:.2f}. "
+                f"{buy_pct}% of {total} Wall Street analysts say BUY. "
+                f"Remaining upside to highest analyst target: +{remaining:.1f}%. "
+                f"Today's move: {pct:+.1f}%. "
+                f"Answer these 3 things in simple language a beginner investor understands: "
+                f"1) Why is this significant? "
+                f"2) Should I sell now, hold for more gains, or wait for a pullback? "
+                f"3) What is the ONE specific thing I should do today?",
                 gemini_calls, max_gemini
             )
+
             msg = (
-                f"🎯 <b>AT ANALYST TARGET — {ticker}</b>\n"
-                f"Price ${price:.2f} ≥ consensus ${consensus:.2f}\n"
-                f"Upside to analyst high: +{remaining:.1f}%\n"
-                f"Consensus: <b>{rec or 'N/A'}</b> | {rec_detail or 'N/A'}\n"
+                f"🎯 <b>TARGET REACHED — {ticker}</b>\n\n"
+                f"<b>What happened:</b>\n"
+                f"Stock hit ${price:.2f} — the price Wall Street experts predicted.\n\n"
+                f"{upside_plain_english(price, consensus, hi_target)}\n\n"
+                f"<b>Expert opinion:</b>\n"
+                f"{rec_plain_english(rec, buy_pct, sell_pct, total)}\n\n"
+                f"<b>📱 Gemini analysis & advice:</b>\n"
+                f"{analysis if analysis else 'Analysis unavailable — check manually.'}"
             )
-            if analysis:
-                msg += f"\n🤖 <b>Gemini:</b> {analysis}"
             alerts.append(msg)
 
         # ── SIGNAL 2: Dip opportunity ──────────────────────────────────────────
         elif upside >= 20 and pct and pct <= -(threshold / 2):
-            rec, rec_detail = get_analyst_recommendation(ticker)
+            if not already_alerted(ticker, "DIP"):
+                rec, buy_pct, sell_pct, total = get_analyst_recommendation(ticker)
 
-            analysis = gemini_analysis(
-                f"{ticker} dropped {pct:.1f}% today to ${price:.2f}. "
-                f"Analyst consensus target is ${consensus:.2f} implying +{upside:.1f}% upside. "
-                f"Consensus: {rec}. {rec_detail}. Beta: {beta_str}. "
-                f"In 2-3 sentences: is this a real dip to buy or a falling knife? "
-                f"What should the investor do? Be specific.",
+                analysis = ask_gemini(
+                    f"Stock: {ticker}. Dropped {abs(pct):.1f}% today to ${price:.2f}. "
+                    f"Wall Street experts average target: ${consensus:.2f} "
+                    f"(that's {upside:.1f}% higher than today's price). "
+                    f"{buy_pct}% of {total} analysts say BUY. "
+                    f"Answer these 3 things in simple language a beginner investor understands: "
+                    f"1) Is this drop a good buying opportunity or a warning sign? "
+                    f"2) What is most likely causing this drop today? "
+                    f"3) What is the ONE specific thing I should do — buy now, wait, or avoid?",
+                    gemini_calls, max_gemini
+                )
+
+                msg = (
+                    f"💰 <b>DIP OPPORTUNITY — {ticker}</b>\n\n"
+                    f"<b>What happened:</b>\n"
+                    f"Stock dropped {abs(pct):.1f}% today to ${price:.2f}.\n"
+                    f"This is a bigger drop than normal for this stock.\n\n"
+                    f"{upside_plain_english(price, consensus, hi_target)}\n\n"
+                    f"<b>Expert opinion:</b>\n"
+                    f"{rec_plain_english(rec, buy_pct, sell_pct, total)}\n\n"
+                    f"<b>📱 Gemini analysis & advice:</b>\n"
+                    f"{analysis if analysis else 'Analysis unavailable — check manually.'}"
+                )
+                alerts.append(msg)
+
+    # ── SIGNAL 3: Unusual price move ──────────────────────────────────────────
+    if abs(pct) >= threshold and not alerts:
+        if not already_alerted(ticker, f"MOVE:{pct:.1f}"):
+            direction  = "gone UP" if pct > 0 else "gone DOWN"
+            icon       = "🟢" if pct > 0 else "🔴"
+            target_str = ""
+            rec_str    = ""
+
+            if target and target.get("consensus"):
+                upside     = ((target["consensus"] - price) / price) * 100
+                target_str = upside_plain_english(price, target["consensus"], target.get("high"))
+                rec, buy_pct, sell_pct, total = get_analyst_recommendation(ticker)
+                rec_str = rec_plain_english(rec, buy_pct, sell_pct, total)
+
+            analysis = ask_gemini(
+                f"Stock: {ticker}. Has {direction} {abs(pct):.1f}% today to ${price:.2f}. "
+                f"This is an unusual move — bigger than its normal daily movement. "
+                f"Volatility info: {beta_exp}. "
+                f"{target_str} "
+                f"Answer these 3 things in simple language a beginner investor understands: "
+                f"1) What most likely caused this move today? "
+                f"2) Is this a reason to panic, celebrate, or stay calm? "
+                f"3) What is the ONE specific thing I should do right now — "
+                f"buy more, sell some, or just hold and watch?",
                 gemini_calls, max_gemini
             )
+
             msg = (
-                f"💰 <b>DIP OPPORTUNITY — {ticker}</b>\n"
-                f"Price ${price:.2f} | Consensus ${consensus:.2f}\n"
-                f"Implied upside: <b>+{upside:.1f}%</b>\n"
-                f"Consensus: <b>{rec or 'N/A'}</b> | {rec_detail or 'N/A'}\n"
+                f"{icon} <b>UNUSUAL MOVE — {ticker}</b>\n\n"
+                f"<b>What happened:</b>\n"
+                f"Stock has {direction} {abs(pct):.1f}% today to ${price:.2f}.\n"
+                f"This is bigger than its normal daily movement.\n"
+                f"<i>({beta_exp})</i>\n\n"
             )
-            if analysis:
-                msg += f"\n🤖 <b>Gemini:</b> {analysis}"
+            if target_str:
+                msg += f"{target_str}\n\n"
+            if rec_str:
+                msg += f"<b>Expert opinion:</b>\n{rec_str}\n\n"
+            msg += (
+                f"<b>📱 Gemini analysis & advice:</b>\n"
+                f"{analysis if analysis else 'Analysis unavailable — check manually.'}"
+            )
             alerts.append(msg)
-
-    # ── SIGNAL 3: Dynamic threshold move alert ────────────────────────────────
-    if abs(pct) >= threshold and not alerts:
-        icon      = "🟢" if pct > 0 else "🔴"
-        direction = "surged" if pct > 0 else "dropped"
-        consensus_line = ""
-        upside_str     = ""
-        if target and target.get("consensus"):
-            upside        = ((target["consensus"] - price) / price) * 100
-            upside_str    = f"+{upside:.1f}% to target"
-            consensus_line = f"Analyst consensus: ${target['consensus']:.2f} ({upside_str})\n"
-
-        analysis = gemini_analysis(
-            f"{ticker} {direction} {abs(pct):.1f}% today to ${price:.2f}. "
-            f"Beta: {beta_str} — alert threshold was {threshold:.1f}%. "
-            f"{consensus_line}"
-            f"In 2-3 sentences: what likely caused this move and what should "
-            f"the investor do? Be specific and direct.",
-            gemini_calls, max_gemini
-        )
-        msg = (
-            f"{icon} <b>MOVE ALERT — {ticker}</b>\n"
-            f"Stock {direction} {pct:+.1f}% · ${price:.2f}\n"
-            f"Dynamic threshold: {threshold:.1f}% (beta={beta_str})\n"
-            f"{consensus_line}"
-        )
-        if analysis:
-            msg += f"\n🤖 <b>Gemini:</b> {analysis}"
-        alerts.append(msg)
 
     return alerts
 
@@ -407,14 +448,13 @@ def main():
     now      = datetime.utcnow()
     hour     = now.hour
 
-    # Detect ETFs dynamically — no hardcoded list
     print("Detecting ETFs via Finnhub...")
     etf_set = set()
     for ticker in tickers:
         if is_etf(ticker):
             etf_set.add(ticker)
-        time.sleep(0.3)
-    print(f"ETFs detected: {etf_set}")
+        time.sleep(0.2)
+    print(f"ETFs: {etf_set}")
 
     num_stocks             = len([t for t in tickers if t not in etf_set])
     max_telegram, max_gemini = calc_limits(num_stocks)
@@ -433,27 +473,31 @@ def main():
         for ticker in tickers:
             price, pct = get_price(ticker)
             if price and pct and abs(pct) >= 2:
-                icon = "🟢" if pct > 0 else "🔴"
-                movers.append(f"{icon} <b>{ticker}</b> {pct:+.1f}% · ${price:.2f}")
+                icon      = "🟢" if pct > 0 else "🔴"
+                direction = "UP" if pct > 0 else "DOWN"
+                movers.append(
+                    f"{icon} <b>{ticker}</b> went {direction} "
+                    f"{abs(pct):.1f}% overnight · now ${price:.2f}"
+                )
             time.sleep(0.3)
 
-        msg  = f"🌅 <b>Morning Brief — {now.strftime('%a %b %d')}</b>\n\n"
-        msg += (
-            f"📋 {len(tickers)} tickers | {num_stocks} stocks | {len(etf_set)} ETFs\n"
-            f"📡 Finnhub prices · FMP analyst targets · Gemini AI\n\n"
-        )
+        msg  = f"🌅 <b>Good morning! — {now.strftime('%a %b %d')}</b>\n\n"
+        msg += f"👀 Watching {len(tickers)} stocks for you today.\n"
+        msg += f"🔔 You will get alerted if anything moves unusually.\n"
+        msg += f"🤖 Every alert includes Gemini analysis + clear action advice.\n\n"
         if movers:
-            msg += "📊 <b>Overnight movers (±2%+):</b>\n" + "\n".join(movers[:10])
+            msg += "📊 <b>Stocks that moved overnight:</b>\n" + "\n".join(movers[:10])
+            msg += "\n\n<i>These moved more than 2% while market was closed.</i>"
         else:
-            msg += "All quiet overnight."
-        msg += "\n\n<i>SEC filings + analyst targets checked every 15 min.</i>"
+            msg += "😴 All quiet overnight — no big moves while you slept."
+        msg += "\n\n<i>Checking every 15 min — 9:30am to 4pm ET.</i>"
         send_telegram(msg)
         save_seen(new_seen)
         return
 
     # ── MARKET HOURS — 14–21 UTC ───────────────────────────────────────────────
     if 14 <= hour <= 21:
-        print("Market hours — live prices + analyst targets + Gemini analysis")
+        print("Market hours — checking all stocks")
         for ticker in tickers:
             if telegram_sent >= max_telegram:
                 break
@@ -477,10 +521,8 @@ def main():
 
     for ticker in tickers:
         if telegram_sent >= max_telegram:
-            print("Telegram limit reached")
             break
         if gemini_calls[0] >= max_gemini:
-            print("Gemini limit reached")
             break
         if ticker in etf_set:
             continue
@@ -499,47 +541,49 @@ def main():
                 continue
 
             new_seen.add(filing_id)
-            company   = filing["company"]
-            form_type = filing["form"]
-            cik_int   = filing["cik_int"]
-
+            company     = filing["company"]
+            form_type   = filing["form"]
+            cik_int     = filing["cik_int"]
             filing_text = get_filing_text(filing["url"])
 
-            # Gemini analyzes both structure + plain English
-            structured = gemini_analysis(
-                f"Analyze this SEC {form_type} filing for {ticker}.\n\n"
-                f"Filing:\n{filing_text[:2000]}\n\n"
-                f"Respond in EXACTLY this format:\n"
-                f"CLASSIFICATION: [POSITIVE / NEGATIVE / NEUTRAL]\n"
-                f"REASON: [one sentence]\n"
-                f"SIGNAL: [BUY / SELL / HOLD]\n"
-                f"SUMMARY: [one plain English sentence]\n"
-                f"IMPACT: [HIGH / MEDIUM / LOW]",
+            form_plain = {
+                "8-K":     "Important company announcement",
+                "10-Q":    "Quarterly earnings report",
+                "10-K":    "Annual earnings report",
+                "S-1":     "Company going public",
+                "DEF 14A": "Shareholder vote coming up",
+            }.get(form_type, form_type)
+
+            # Gemini reads the filing and gives complete plain English advice
+            analysis = ask_gemini(
+                f"Company: {company} (stock ticker: {ticker}). "
+                f"They just filed an official document with the US government. "
+                f"Document type: {form_plain} ({form_type}). "
+                f"Here is what it says: {filing_text[:800]}. "
+                f"Answer these 3 things in very simple language anyone can understand: "
+                f"1) What exactly happened — explain like I am 10 years old. "
+                f"2) Is this GOOD news or BAD news for the stock price? Why? "
+                f"3) What should I do RIGHT NOW — buy more shares, sell my shares, "
+                f"or just hold and do nothing? Give a clear direct recommendation.",
                 gemini_calls, max_gemini
             )
 
-            plain = gemini_analysis(
-                f"SEC {form_type} just filed for {ticker} ({company}). "
-                f"Filing summary: {filing_text[:500]}. "
-                f"In 2-3 sentences: what happened and is this good or bad for the stock?",
-                gemini_calls, max_gemini
-            )
-
-            if structured or plain:
+            if analysis:
                 msg = (
-                    f"📋 <b>NEW FILING — {ticker}</b>\n"
-                    f"<b>{company}</b> | {form_type} | {filing['date']}\n\n"
+                    f"📋 <b>COMPANY NEWS — {ticker}</b>\n\n"
+                    f"<b>Type of news:</b> {form_plain}\n"
+                    f"<b>Company:</b> {company}\n"
+                    f"<b>Date:</b> {filing['date']}\n\n"
+                    f"<b>📱 Gemini explains + tells you what to do:</b>\n"
+                    f"{analysis}"
                 )
-                if structured:
-                    msg += f"{structured}\n\n"
-                if plain:
-                    msg += f"🤖 <b>Gemini plain English:</b>\n{plain}"
             else:
                 link = edgar_link(form_type, cik_int)
                 msg = (
-                    f"📋 <b>NEW FILING — {ticker}</b>\n"
-                    f"{company} | {form_type} | {filing['date']}\n"
-                    f"<a href='{link}'>View on EDGAR →</a>"
+                    f"📋 <b>COMPANY NEWS — {ticker}</b>\n\n"
+                    f"{company} filed a {form_plain}.\n"
+                    f"Date: {filing['date']}\n\n"
+                    f"<a href='{link}'>Read the full filing →</a>"
                 )
 
             send_telegram(msg)
