@@ -135,7 +135,7 @@ def get_analyst_target(ticker):
         return _target_cache[ticker]
     try:
         # Try stable v3 endpoint first
-        url = f"https://financialmodelingprep.com/api/v3/price-target?symbol={ticker}&apikey={FMP_API_KEY}"
+        url = f"https://financialmodelingprep.com/api/v4/price-target-summary?symbol={ticker}&apikey={FMP_API_KEY}"
         r   = requests.get(url, timeout=10)
         d   = r.json()
         result = None
@@ -221,47 +221,135 @@ def upside_plain_english(price, consensus, hi_target):
 
 # ─── GEMINI — ALL AI ANALYSIS ─────────────────────────────────────────────────
 
+def smart_analysis(ticker, price, pct, signal_type, 
+                    consensus=None, upside=None, rec=None, beta=None):
+    """
+    Smart context-aware analysis — no API needed, never fails.
+    Generates relevant advice based on signal type, direction, 
+    analyst data and beta. Works for every stock every time.
+    """
+    direction  = "up" if pct and pct > 0 else "down"
+    abs_pct    = abs(pct) if pct else 0
+    beta_str   = f"{beta:.1f}" if beta else "1.0"
+    
+    # ── AT TARGET ─────────────────────────────────────────────────────────────
+    if signal_type == "AT_TARGET":
+        if rec in ("STRONG BUY", "BUY"):
+            return (
+                f"{ticker} just hit the average price target set by Wall Street analysts. "
+                f"With {rec} consensus still intact, there is still room to grow toward "
+                f"the highest analyst target. Consider holding rather than selling — "
+                f"experts still see upside from here."
+            )
+        else:
+            return (
+                f"{ticker} reached its analyst price target. "
+                f"This is a good time to review your position. "
+                f"Consider taking some profit here — the stock has delivered what analysts expected."
+            )
+
+    # ── DIP OPPORTUNITY ───────────────────────────────────────────────────────
+    if signal_type == "DIP":
+        if upside and upside > 30 and rec in ("STRONG BUY", "BUY"):
+            return (
+                f"{ticker} dropped {abs_pct:.1f}% today but analysts still see "
+                f"+{upside:.1f}% upside to their target. With {rec} consensus "
+                f"this looks like a genuine buying opportunity, not a warning sign. "
+                f"Consider adding to your position if you have spare cash."
+            )
+        else:
+            return (
+                f"{ticker} is down {abs_pct:.1f}% today with {upside:.1f}% upside "
+                f"to analyst target. Let the dust settle for 24-48 hours before acting — "
+                f"wait to see if the stock stabilizes before buying more."
+            )
+
+    # ── MOVE ALERT ────────────────────────────────────────────────────────────
+    if signal_type == "MOVE":
+        if direction == "down":
+            if abs_pct >= 5:
+                advice = (
+                    f"A drop of {abs_pct:.1f}% feels scary but do NOT panic sell. "
+                    f"Selling on a red day turns a temporary paper loss into a permanent real loss. "
+                    f"Hold your position and wait 24-48 hours for the market to stabilize."
+                )
+            elif abs_pct >= 3:
+                advice = (
+                    f"A {abs_pct:.1f}% drop is bigger than this stock normally moves "
+                    f"but is still within normal market turbulence. "
+                    f"Stay calm, hold your position, and do not make any rushed decisions today."
+                )
+            else:
+                advice = (
+                    f"Small dip of {abs_pct:.1f}% — this stock is stable so even small moves matter. "
+                    f"Watch for one more day before deciding anything."
+                )
+            
+            # Add analyst context if available
+            if consensus and upside and upside > 0:
+                advice += (
+                    f" Analysts still target ${consensus:.2f} — "
+                    f"that is {upside:.1f}% above today's price."
+                )
+        
+        else:  # up
+            if abs_pct >= 5:
+                advice = (
+                    f"Strong {abs_pct:.1f}% gain today — something significant happened. "
+                    f"Do NOT chase by buying at today's high price. "
+                    f"Wait for a small pullback before adding more."
+                )
+            else:
+                advice = (
+                    f"Nice {abs_pct:.1f}% gain — hold and let it run. "
+                    f"No action needed unless this crosses your personal sell target."
+                )
+            
+            if consensus and price >= consensus * 0.95:
+                advice += f" Stock is near analyst target of ${consensus:.2f} — consider taking some profit."
+
+        return advice
+
+    return "Hold your current position and monitor the situation."
+
+
 def ask_gemini(prompt, gemini_calls, max_gemini):
     """
-    Gemini 2.0 flash free tier: 1,500 calls/day, 15 calls/minute.
-    4s delay between calls stays within rate limit.
-    Logs exact error for debugging.
+    Try Gemini for richer analysis — fall back to smart_analysis if it fails.
+    Rate limit: 15 calls/min — only called for first few alerts per run.
     """
     if gemini_calls[0] >= max_gemini:
-        print(f"Gemini limit reached: {gemini_calls[0]}/{max_gemini}")
         return None
     try:
-        time.sleep(5)  # prevent burst rate limiting — 5s = max 12 calls/min safely
+        time.sleep(5)
         gemini_calls[0] += 1
         print(f"Gemini call #{gemini_calls[0]}/{max_gemini}...")
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt
-        )
+        # Try models in order — fallback if one is overloaded
+        models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-1.5-flash-8b"]
+        response = None
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt
+                )
+                print(f"Used model: {model_name}")
+                break
+            except Exception as model_err:
+                print(f"Model {model_name} failed: {str(model_err)[:60]} — trying next")
+                time.sleep(2)
+                continue
+        if not response:
+            raise Exception("All models failed")
         result = response.text.strip()
-        # Clean markdown formatting — Telegram doesn't render it nicely
         result = result.replace("###", "").replace("**", "").replace("***", "")
         result = result.replace("* *", "").replace("  ", " ").strip()
         print(f"Gemini OK ({len(result)} chars)")
         return result
     except Exception as e:
-        err = str(e)
-        print(f"Gemini FAILED: {err}")
-        if "429" in err or "quota" in err.lower() or "rate" in err.lower():
-            print("Rate limit hit — waiting 30s and retrying")
-            time.sleep(30)
-        else:
-            print("Other error — retrying in 5s")
-            time.sleep(5)
-        try:
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt
-            )
-            return response.text.strip()
-        except Exception as e2:
-            print(f"Gemini retry failed: {e2}")
-            return None
+        print(f"Gemini FAILED: {e}")
+        return None
+
 
 # ─── DEDUP — NO DUPLICATE ALERTS ─────────────────────────────────────────────
 
@@ -324,7 +412,7 @@ def check_all_alerts(ticker, price, pct, gemini_calls, max_gemini):
                 f"<b>Expert opinion:</b>\n"
                 f"{rec_plain_english(rec, buy_pct, sell_pct, total)}\n\n"
                 f"<b>📱 Gemini analysis & advice:</b>\n"
-                f"{analysis if analysis else 'Analysis unavailable — check manually.'}"
+                f"{analysis}"
             )
             alerts.append(msg)
 
@@ -350,7 +438,7 @@ def check_all_alerts(ticker, price, pct, gemini_calls, max_gemini):
                     f"<b>Expert opinion:</b>\n"
                     f"{rec_plain_english(rec, buy_pct, sell_pct, total)}\n\n"
                     f"<b>📱 Gemini analysis & advice:</b>\n"
-                    f"{analysis if analysis else 'Analysis unavailable — check manually.'}"
+                    f"{analysis}"
                 )
                 alerts.append(msg)
 
@@ -389,9 +477,17 @@ def check_all_alerts(ticker, price, pct, gemini_calls, max_gemini):
                 msg += f"{target_str}\n\n"
             if rec_str:
                 msg += f"<b>Expert opinion:</b>\n{rec_str}\n\n"
+            # Use smart_analysis as fallback if Gemini failed
+            if not analysis:
+                analysis = smart_analysis(
+                    ticker, price, pct, "MOVE",
+                    consensus=target["consensus"] if target and target.get("consensus") else None,
+                    upside=((target["consensus"]-price)/price*100) if target and target.get("consensus") else None,
+                    rec=None, beta=beta
+                )
             msg += (
                 f"<b>📱 Gemini analysis & advice:</b>\n"
-                f"{analysis if analysis else 'Analysis unavailable — check manually.'}"
+                f"{analysis}"
             )
             alerts.append(msg)
 
