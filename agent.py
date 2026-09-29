@@ -597,7 +597,14 @@ def main():
     )
 
     # ── MORNING BRIEF — 12 UTC = 7 AM ET ──────────────────────────────────────
-    if hour == 12:
+    if hour in (11, 12, 13):  # 7 AM ET ± 1 hour for GitHub cron delays
+        # Send morning brief only once per day
+        brief_key = f"brief_{now.strftime('%Y-%m-%d')}"
+        if brief_key in seen:
+            print(f"Morning brief already sent today ({brief_key}) — skipping")
+            save_seen(new_seen)
+            return
+
         movers = []
         for ticker in tickers:
             price, pct = get_price(ticker)
@@ -621,6 +628,7 @@ def main():
             msg += "😴 All quiet overnight — no big moves while you slept."
         msg += "\n\n<i>Checking every 15 min — 9:30am to 4pm ET.</i>"
         send_telegram(msg)
+        new_seen.add(brief_key)
         save_seen(new_seen)
         return
 
