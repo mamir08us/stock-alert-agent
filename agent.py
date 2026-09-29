@@ -131,18 +131,21 @@ def is_etf(ticker):
 _target_cache = {}
 
 def get_analyst_target(ticker):
+    """
+    Get analyst targets from FMP using stable v4 endpoint.
+    Falls back gracefully if unavailable.
+    """
     if ticker in _target_cache:
         return _target_cache[ticker]
     try:
-        # Try stable v3 endpoint first
-        url = f"https://financialmodelingprep.com/api/v4/price-target-summary?symbol={ticker}&apikey={FMP_API_KEY}"
+        # Use price-target endpoint with correct format
+        url = f"https://financialmodelingprep.com/api/v4/price-target?symbol={ticker}&apikey={FMP_API_KEY}"
         r   = requests.get(url, timeout=10)
         d   = r.json()
         result = None
 
         if isinstance(d, list) and len(d) > 0:
-            # v3 returns list of individual analyst targets — calculate consensus
-            targets = [item["priceTarget"] for item in d if item.get("priceTarget")]
+            targets = [item.get("priceTarget") for item in d[:10] if item.get("priceTarget")]
             if targets:
                 result = {
                     "consensus": round(sum(targets) / len(targets), 2),
@@ -150,17 +153,12 @@ def get_analyst_target(ticker):
                     "low":       round(min(targets), 2),
                     "median":    round(sorted(targets)[len(targets)//2], 2),
                 }
-        elif isinstance(d, dict) and d.get("targetConsensus"):
-            result = {
-                "consensus": round(d["targetConsensus"], 2),
-                "high":      round(d["targetHigh"], 2) if d.get("targetHigh") else None,
-                "low":       round(d["targetLow"], 2)  if d.get("targetLow")  else None,
-                "median":    round(d["targetMedian"], 2) if d.get("targetMedian") else None,
-            }
-
+        
         if not result:
-            print(f"FMP no target for {ticker}: {str(d)[:80]}")
-
+            print(f"FMP no target for {ticker}")
+        else:
+            print(f"FMP target for {ticker}: ${result['consensus']}")
+            
         _target_cache[ticker] = result
         return result
     except Exception as e:
@@ -325,7 +323,7 @@ def ask_gemini(prompt, gemini_calls, max_gemini):
         gemini_calls[0] += 1
         print(f"Gemini call #{gemini_calls[0]}/{max_gemini}...")
         # Try models in order — fallback if one is overloaded
-        models_to_try = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-1.5-flash-8b"]
+        models_to_try = ["gemini-2.0-flash-lite", "gemini-2.0-flash-exp", "gemini-1.5-pro"]
         response = None
         for model_name in models_to_try:
             try:
