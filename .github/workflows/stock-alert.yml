@@ -2,42 +2,55 @@ name: Stock Alert Agent
 
 on:
   schedule:
-    - cron: '0 11 * * 1-5'    # 6 AM ET — early catch
-    - cron: '0 12 * * 1-5'    # 7 AM ET — morning brief
-    - cron: '0 13 * * 1-5'    # 8 AM ET — backup if delayed
-    - cron: '*/15 14-21 * * 1-5'  # Every 15 min market hours
-  workflow_dispatch:
+    # Morning brief — 12 UTC = 8 AM ET (GitHub cron can be 30 min late)
+    - cron: "0 11,12,13 * * 1-5"
+    # Market hours — every 15 min, 9:30 AM to 4 PM ET (14:30–21:00 UTC)
+    - cron: "*/15 14-21 * * 1-5"
+  workflow_dispatch:  # Manual trigger from GitHub UI
 
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    timeout-minutes: 8
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
 
       - name: Install dependencies
-        run: pip install requests google-genai
+        run: pip install -r requirements.txt
 
-      - name: Run agent
+      - name: Restore seen filings cache
+        uses: actions/cache@v4
+        with:
+          path: seen_filings.json
+          key: seen-filings-${{ github.run_id }}
+          restore-keys: |
+            seen-filings-
+
+      - name: Run stock alert agent
         env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+          FINNHUB_API_KEY:  ${{ secrets.FINNHUB_API_KEY }}
+          FMP_API_KEY:      ${{ secrets.FMP_API_KEY }}
         run: python agent.py
 
-      - name: Save state
-        run: |
-          git config user.email "actions@github.com"
-          git config user.name "GitHub Actions"
-          git add seen_filings.json || true
-          git diff --staged --quiet || git commit -m "Update seen filings"
-          git push || true
+      - name: Save seen filings cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: seen_filings.json
+          key: seen-filings-${{ github.run_id }}
