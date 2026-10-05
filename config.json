@@ -1,0 +1,17 @@
+{
+  "gemini_models": [
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-flash-latest"
+  ],
+  "telegram_max": null,
+  "gemini_max": null,
+  "morning_brief_hour_utc": [11, 12, 13],
+  "market_hours_utc": [14, 21],
+  "etf_alert_threshold_pct": 2.0,
+  "move_alert_min_pct": 3.0,
+  "dip_min_upside_pct": 20.0,
+  "sec_forms": ["8-K", "10-Q", "10-K", "S-1", "DEF 14A"],
+  "price_sleep_sec": 0.3,
+  "gemini_sleep_sec": 5
+}
